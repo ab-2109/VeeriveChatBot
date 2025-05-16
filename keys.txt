@@ -1,9 +1,0 @@
-qdrant : "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.RYAYHgpWnTy9SDZEkpER_1O_QSrvfZ-XTcrq8Wdhkx4"
-qdrant_cluster_id : 9c4151fc-4aaf-418b-ac17-970854ac8a8f
-NEO4J_URI=neo4j+s://7c34f8ed.databases.neo4j.io
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=sQ2orCpnD6ho8UPl5936QVCk-gpLE3R82KHqpBj3kBs
-AURA_INSTANCEID=7c34f8ed
-AURA_INSTANCENAME=Instance01
-openai="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"
-github="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"
