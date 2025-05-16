@@ -2,7 +2,7 @@ services:
   - type: web
     name: veerive-app
     env: docker
-    repo: https://github.com/your-username/your-repo-name  # ← replace this!
+    repo: https://github.com/ab-2109/VeeriveChatBot
     branch: main
     dockerfilePath: ./Dockerfile
     envVars:
