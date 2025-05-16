@@ -2,8 +2,7 @@
 let waitingForClarification = false;
 let activeSessionId = null;
 
-// Define the API base URL - use relative URLs instead of hardcoded localhost
-const API_BASE = 'http://localhost:8000'; // Point to your FastAPI server
+const API_BASE = '172-31-82-193:8000'; 
 
 // Core functions for the chat interface
 document.addEventListener('DOMContentLoaded', () => {
