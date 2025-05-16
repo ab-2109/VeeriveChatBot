@@ -18,6 +18,13 @@ services:
         sync: false
       - key: NEO4J_PASSWORD
         sync: false
+      - key: QDRANT_API_KEY
+
+        sync: false
+      - key : MONGO_USERNAME
+        sync: false
+      - key: MONGO_PASSWORD 
+        sync: false
     plan: free
     autoDeploy: true
     healthCheckPath: /health
