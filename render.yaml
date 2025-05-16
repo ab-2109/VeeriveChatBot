@@ -21,5 +21,4 @@ services:
     plan: free
     autoDeploy: true
     healthCheckPath: /health
-    ports:
-      - 8000
+    
