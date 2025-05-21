@@ -2,7 +2,7 @@
 let waitingForClarification = false;
 let activeSessionId = null;
 
-const API_BASE = '172-31-82-193:8000'; 
+const API_BASE = '3.86.52.25:8000'; 
 
 // Core functions for the chat interface
 document.addEventListener('DOMContentLoaded', () => {
