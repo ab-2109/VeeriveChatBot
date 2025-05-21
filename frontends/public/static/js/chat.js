@@ -2,7 +2,7 @@
 let waitingForClarification = false;
 let activeSessionId = null;
 
-const API_BASE = '3.86.52.25:8000'; 
+const API_BASE = 'https://3.86.52.25:8000'; // At minimum, add https://
 
 // Core functions for the chat interface
 document.addEventListener('DOMContentLoaded', () => {
@@ -62,7 +62,7 @@ function sendQuestion() {
     input.value = '';
     disableInput();
 
-    fetch('http://localhost:8000/graph', {
+    fetch(`${API_BASE}/graph`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: question })
@@ -90,7 +90,7 @@ function submitClarification() {
     input.placeholder = 'Processing...';
     disableInput();
 
-    fetch('http://localhost:8000/clarify', {
+    fetch(`${API_BASE}/clarify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
