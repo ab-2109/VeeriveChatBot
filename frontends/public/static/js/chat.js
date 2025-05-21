@@ -2,7 +2,7 @@
 let waitingForClarification = false;
 let activeSessionId = null;
 
-const API_BASE = 'https://3.86.52.25:8000'; // At minimum, add https://
+const API_BASE = 'http://3.86.52.25:8000'; // At minimum, add https://
 
 // Core functions for the chat interface
 document.addEventListener('DOMContentLoaded', () => {
