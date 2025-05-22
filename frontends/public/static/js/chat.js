@@ -2,29 +2,18 @@
 let waitingForClarification = false;
 let activeSessionId = null;
 
-const API_BASE = 'http://3.86.52.25:8000'; // At minimum, add https://
+const API_BASE = 'http://3.86.52.25:8000'; 
 
 // Core functions for the chat interface
 document.addEventListener('DOMContentLoaded', () => {
-    console.log("Chat.js loaded!");
-    
     // Get DOM elements
     const messagesContainer = document.getElementById('messages-container');
     const questionInput = document.getElementById('question-input');
     const sendButton = document.getElementById('send-button');
     const typingIndicator = document.getElementById('typing-indicator');
     
-    // Debug log elements
-    console.log("Elements found:", {
-        messagesContainer: !!messagesContainer,
-        questionInput: !!questionInput,
-        sendButton: !!sendButton,
-        typingIndicator: !!typingIndicator
-    });
-    
     // Attach event listener to send button
     sendButton.addEventListener('click', () => {
-        console.log("Send button clicked, clarification mode:", waitingForClarification);
         if (waitingForClarification) {
             submitClarification();
         } else {
@@ -35,7 +24,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Auto resize the textarea as user types
     questionInput.addEventListener('input', () => {
         questionInput.style.height = 'auto';
-        
         questionInput.style.height = questionInput.scrollHeight + 'px';
     });
     
@@ -72,12 +60,10 @@ function sendQuestion() {
         handleApiResponse(data);
     })
     .catch(err => {
-        console.error("Graph error:", err);
         addMessage(`Error: ${err.message}`, 'system');
         resetConversationState();
     });
 }
-
 
 // Submit a clarification answer
 function submitClarification() {
@@ -100,20 +86,16 @@ function submitClarification() {
     })
     .then(res => res.json())
     .then(data => {
-        handleApiResponse(data);  // ✅ reuse the same response handler
+        handleApiResponse(data);
     })
     .catch(err => {
-        console.error("Clarification error:", err);
         addMessage(`Error: ${err.message}`, 'system');
         resetConversationState();
     });
 }
 
-
 // Fetch response from the API
 function fetchGraphResponse(question, metadata = null) {
-    debugDisplay("Sending request to backend: " + question);
-    
     // Use relative URL instead of hardcoded localhost
     fetch(`/api/graph`, {
         method: 'POST',
@@ -133,11 +115,9 @@ function fetchGraphResponse(question, metadata = null) {
         return response.json();
     })
     .then(data => {
-        debugDisplay("API response received: " + JSON.stringify(data).substring(0, 100) + "...");
         handleApiResponse(data);
     })
     .catch(error => {
-        console.error('Error:', error);
         addMessage(`Error: ${error.message}`, 'system');
         resetConversationState();
     });
@@ -145,12 +125,7 @@ function fetchGraphResponse(question, metadata = null) {
 
 // Handle the API response
 function handleApiResponse(data) {
-    console.log("Response status:", data.status);
-    console.log("Full data:", data);
-    
     if (data.status === "clarification_needed") {
-        console.log("Setting up for clarification, session ID:", data.session_id);
-        
         activeSessionId = data.session_id;
         waitingForClarification = true;
         
@@ -174,23 +149,19 @@ function handleApiResponse(data) {
         );
         addMessage(formattedResponse, 'assistant');
 
-        // ✅ Re-enable input for next query
         enableInput();
         document.getElementById('question-input').focus();
     }
     else if (data.status === "error") {
         const errorMsg = data.error || "Unknown error occurred";
-        console.error("API error:", errorMsg);
         addMessage(`Error: ${errorMsg}`, 'system');
         resetConversationState();
     }
     else {
-        console.error("Unknown API status:", data.status);
         addMessage(`Error: Received unknown status '${data.status}' from server`, 'system');
         resetConversationState();
     }
 }
-
 
 // Reset conversation state
 function resetConversationState() {
@@ -205,7 +176,6 @@ function resetConversationState() {
 
 // Add a message to the chat
 function addMessage(content, sender) {
-    debugDisplay("Adding " + sender + " message");
     const messagesContainer = document.getElementById('messages-container');
     
     const messageDiv = document.createElement('div');
@@ -229,8 +199,6 @@ function addMessage(content, sender) {
 
 // Format the response
 function formatResponse(result) {
-    console.log("Formatting result:", result);
-    
     if (!result) return "No result received";
     
     // Handle undefined result
@@ -240,14 +208,11 @@ function formatResponse(result) {
     
     // Check if we have the nested generated_response structure
     if (result.generated_response) {
-        console.log("Found generated_response, using that");
         return formatResponse(result.generated_response);
     }
     
     // Check if we have the structured/conversational format
     if (result.structured && result.conversational) {
-        console.log("Using structured/conversational format");
-        
         const structuredData = result.structured.data;
         const conversationalData = result.conversational.data;
         
@@ -626,7 +591,6 @@ function disableInput() {
     document.getElementById('send-button').disabled = true;
 }
 
-
 function enableInput() {
     document.getElementById('question-input').disabled = false;
     document.getElementById('send-button').disabled = false;
@@ -640,10 +604,8 @@ function hideTypingIndicator() {
     document.getElementById('typing-indicator').classList.add('hidden');
 }
 
-// Global functions for dropdown and tab switching
+// Tab switching and dropdown functions
 function switchTab(event, tabName) {
-    console.log("Switching to tab:", tabName);
-    
     // Hide all tab content
     const tabContents = document.querySelectorAll('.tab-content');
     for (let i = 0; i < tabContents.length; i++) {
@@ -661,14 +623,10 @@ function switchTab(event, tabName) {
     if (targetTab) {
         targetTab.classList.add('active');
         event.currentTarget.classList.add('active');
-    } else {
-        console.error("Tab not found:", tabName + '-tab');
     }
 }
 
 function toggleDropdown(header) {
-    console.log("Toggling dropdown");
-    
     const content = header.nextElementSibling;
     const arrow = header.querySelector('.dropdown-arrow');
     
