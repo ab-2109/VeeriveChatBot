@@ -62,7 +62,7 @@ function sendQuestion() {
     input.value = '';
     disableInput();
 
-    fetch(`${API_BASE}/graph`, {
+    fetch(`api/graph`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: question })
@@ -90,7 +90,7 @@ function submitClarification() {
     input.placeholder = 'Processing...';
     disableInput();
 
-    fetch(`${API_BASE}/clarify`, {
+    fetch(`api/clarify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -115,7 +115,7 @@ function fetchGraphResponse(question, metadata = null) {
     debugDisplay("Sending request to backend: " + question);
     
     // Use relative URL instead of hardcoded localhost
-    fetch(`${API_BASE}/graph`, {
+    fetch(`api/graph`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 

@@ -201,8 +201,8 @@ class DatabaseSynchronizer:
                     
                 # Extract MongoDB IDs from payload
                 for point in points:
-                    if 'post_id' in point.payload:
-                        existing_ids.add(point.payload['post_id'])
+                    if 'postId' in point.payload:
+                        existing_ids.add(point.payload['postId'])
                 
                 offset += limit
                 if len(points) < limit:
