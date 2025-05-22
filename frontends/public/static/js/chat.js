@@ -220,16 +220,19 @@ function formatResponse(result) {
             return markdownToHtml(conversationalData) || "No data received";
         }
         
-        // Create tabs UI
+        // Generate a unique ID for this message's tabs
+        const tabId = 'tab_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+        
+        // Create tabs UI with unique IDs
         let html = `
-        <div class="response-tabs">
-            <button class="tab-btn active" onclick="switchTab(event, 'structured')">Structured</button>
-            <button class="tab-btn" onclick="switchTab(event, 'conversational')">Conversational</button>
+        <div class="response-tabs" data-tab-group="${tabId}">
+            <button class="tab-btn active" onclick="switchTab(event, 'structured', '${tabId}')">Structured</button>
+            <button class="tab-btn" onclick="switchTab(event, 'conversational', '${tabId}')">Conversational</button>
         </div>
         `;
         
         // Structured tab content
-        html += `<div id="structured-tab" class="tab-content active">`;
+        html += `<div id="structured-tab-${tabId}" class="tab-content active">`;
         
         // Module 1
         if (structuredData.module1) {
@@ -385,7 +388,7 @@ function formatResponse(result) {
         html += `</div>`;
         
         // Conversational tab content
-        html += `<div id="conversational-tab" class="tab-content">`;
+        html += `<div id="conversational-tab-${tabId}" class="tab-content">`;
         html += markdownToHtml(conversationalData) || "<p>No conversational response available</p>";
         html += `</div>`;
         
@@ -604,22 +607,28 @@ function hideTypingIndicator() {
     document.getElementById('typing-indicator').classList.add('hidden');
 }
 
-// Tab switching and dropdown functions
-function switchTab(event, tabName) {
-    // Hide all tab content
-    const tabContents = document.querySelectorAll('.tab-content');
+// Modified tab switching function to handle unique tab groups
+function switchTab(event, tabName, tabGroupId) {
+    // Get the parent tab group container
+    const tabGroup = event.currentTarget.closest('.response-tabs');
+    
+    // Find only the tab contents within this message's container
+    const messageContainer = tabGroup.parentElement;
+    const tabContents = messageContainer.querySelectorAll('.tab-content');
+    
+    // Hide all tab contents in this message
     for (let i = 0; i < tabContents.length; i++) {
         tabContents[i].classList.remove('active');
     }
     
-    // Remove active class from all tab buttons
-    const tabButtons = document.querySelectorAll('.tab-btn');
+    // Remove active class from all tab buttons in this message
+    const tabButtons = tabGroup.querySelectorAll('.tab-btn');
     for (let i = 0; i < tabButtons.length; i++) {
         tabButtons[i].classList.remove('active');
     }
     
     // Show the selected tab content and mark the button as active
-    const targetTab = document.getElementById(tabName + '-tab');
+    const targetTab = document.getElementById(tabName + '-tab-' + tabGroupId);
     if (targetTab) {
         targetTab.classList.add('active');
         event.currentTarget.classList.add('active');
