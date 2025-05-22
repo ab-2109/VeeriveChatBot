@@ -4,11 +4,11 @@ const nextConfig = {
       return [
         {
           source: '/api/:path*',
-          destination: 'http://<YOUR-EC2-PUBLIC-IP>:8000/:path*',
+          destination: 'http://3.86.52.25:8000/:path*',
         },
       ];
     },
   };
   
-  module.exports = nextConfig;
+module.exports = nextConfig;
   
