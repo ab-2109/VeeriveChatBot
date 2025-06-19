@@ -173,14 +173,26 @@ def process_query(query: str, metadata: Dict[str, Any] = None, interactive_callb
     
     return result
 
-def process_clarification(session_id: str, clarification_answer: str, query: str, metadata: Dict[str, Any], interactive_callback=None) -> Dict[str, Any]:
-    # Process the clarification answer
+def process_clarification(session_id: str, clarification_answer: str, metadata: Dict[str, Any] = None, interactive_callback=None) -> Dict[str, Any]:
+    """Process a clarification answer and continue the graph execution"""
     try:
         # Update metadata with the clarification answer
-        updated_metadata = process_clarification_answer(query, clarification_answer, metadata)
+        updated_metadata = process_clarification_answer("", clarification_answer, metadata or {})
         
-        # Process the query with updated metadata (including clarifications)
-        return process_query(query, updated_metadata, interactive_callback)
+        # Create a graph that starts from the refine step
+        graph = build_graph(interactive_callback)
+        
+        # Use this to bypass the intake and clarification steps
+        refine_graph = graph.with_config(entry_point="refine")
+        
+        # Invoke with empty query to avoid conflicts
+        result = refine_graph.invoke({
+            "query": "",  # Empty query to avoid conflicts
+            "metadata": updated_metadata,
+            "errors": []
+        })
+        
+        return result
     except Exception as e:
         return {
             "status": "error", 
