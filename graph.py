@@ -12,7 +12,7 @@ from agents.clarification import clarification_node, process_clarification_answe
 load_dotenv()
 
 class GraphState(TypedDict):
-    query: Annotated[str, "replace"]
+    query: Annotated[str, "append"]
     metadata: Dict[str, Any]
     intake_state: Optional[Dict[str, Any]]
     refined_query: Optional[Dict[str, Any]]
