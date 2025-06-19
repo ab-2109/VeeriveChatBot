@@ -185,9 +185,9 @@ def process_clarification(session_id: str, clarification_answer: str, metadata: 
         # Use this to bypass the intake and clarification steps
         refine_graph = graph.with_config(entry_point="refine")
         
-        # Invoke with empty query to avoid conflicts
+        # IMPORTANT: Don't include query in the invoke call
         result = refine_graph.invoke({
-            "query": "",  # Empty query to avoid conflicts
+            # "query": "",  # REMOVE THIS LINE
             "metadata": updated_metadata,
             "errors": []
         })

@@ -102,6 +102,10 @@ async def clarification_endpoint(response: ClarificationResponse):
 
     try:
         metadata = session["metadata"]
+        
+        # Make sure original query is preserved
+        if "original_query" not in metadata:
+            metadata["original_query"] = session["query"]
 
         # Inject clarification question + answer
         last_question = session.get("clarification_question", "Clarification question")
@@ -119,7 +123,6 @@ async def clarification_endpoint(response: ClarificationResponse):
         result = process_clarification(
             session_id=response.session_id,
             clarification_answer=response.answer,
-            # query=session["query"],  <- Remove this line
             metadata=metadata,
             interactive_callback=clarification_callback(response.session_id)
         )
