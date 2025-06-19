@@ -119,7 +119,7 @@ async def clarification_endpoint(response: ClarificationResponse):
         result = process_clarification(
             session_id=response.session_id,
             clarification_answer=response.answer,
-            query=session["query"],
+            # query=session["query"],  <- Remove this line
             metadata=metadata,
             interactive_callback=clarification_callback(response.session_id)
         )
