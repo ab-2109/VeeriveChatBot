@@ -55,7 +55,7 @@
         
         .user {
             background-color: #0070f3;
-            color: white;
+            color: black;
             align-self: flex-end;
         }
         
@@ -136,36 +136,26 @@
         }
         
         /* Styles for structured responses */
+        .structured-response {
+            padding: 10px;
+        }
+        
         .structured-response h3 {
-            color: #0366d6;
-            margin-top: 1rem;
-            margin-bottom: 0.5rem;
+            color: #0070f3;
+            margin-top: 0;
+            margin-bottom: 15px;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 5px;
         }
         
         .structured-response h4 {
-            color: #555;
-            margin-top: 0.8rem;
-            margin-bottom: 0.4rem;
+            color: #333;
+            margin-top: 15px;
+            margin-bottom: 5px;
         }
         
-        .table-wrapper {
-            overflow-x: auto;
-            margin: 1rem 0;
-        }
-        
-        .response-table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        
-        .response-table th, .response-table td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-        
-        .response-table th {
-            background-color: #f2f2f2;
+        .structured-response ul {
+            margin-top: 5px;
         }
 
         /* Add these to your existing styles */
@@ -210,6 +200,163 @@
             border-bottom: 2px solid #0070f3;
             font-weight: bold;
         }
+
+        #debug-toggle {
+            position: fixed;
+            bottom: 10px;
+            right: 320px;
+            z-index: 10000;
+            padding: 5px;
+            background: #eee;
+            border: 1px solid #ccc;
+            cursor: pointer;
+        }
+
+        /* Add inside your head tag or existing style section */
+        .structured-data {
+            margin-top: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        
+        .structured-data summary {
+            padding: 10px;
+            background: #f5f5f5;
+            cursor: pointer;
+            font-weight: bold;
+            color: #2c5282;
+        }
+        
+        .structured-content {
+            padding: 15px;
+        }
+        
+        .conversational-content {
+            margin-bottom: 10px;
+        }
+
+        /* Add these styles for structured messages */
+        .message.structured {
+            background-color: #f0f7ff;
+            border-left: 4px solid #0070f3;
+        }
+
+        /* Dropdown section styling for structured data */
+        .dropdown-section {
+            border: 1px solid #e3e8ee;
+            border-radius: 6px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        
+        .dropdown-section summary {
+            padding: 10px;
+            background-color: #f0f7ff;
+            cursor: pointer;
+            position: relative;
+        }
+        
+        .dropdown-section summary h4 {
+            display: inline;
+            margin: 0;
+            color: #2c5282;
+        }
+        
+        .dropdown-section summary::after {
+            content: "▼";
+            position: absolute;
+            right: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #2c5282;
+            font-size: 12px;
+        }
+        
+        .dropdown-section[open] summary::after {
+            content: "▲";
+        }
+        
+        .dropdown-section ul, 
+        .dropdown-section p, 
+        .dropdown-section pre {
+            margin: 0;
+            padding: 15px;
+        }
+        
+        /* Section styling */
+        .section {
+            margin: 10px 0;
+        }
+        
+        /* Table styling */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        
+        .data-table th, 
+        .data-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        
+        .data-table th {
+            background-color: #f2f2f2;
+        }
+        
+        .data-table tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        
+        /* Enhanced structured response styling */
+        .structured-response {
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .message.structured .message-content {
+            padding: 0;
+        }
+
+        /* Add these styles inside your existing style section */
+    
+        /* Separator between structured and conversational parts */
+        .response-separator {
+            margin: 20px 0;
+            border: 0;
+            height: 1px;
+            background-image: linear-gradient(to right, rgba(0, 0, 0, 0), rgba(0, 112, 243, 0.5), rgba(0, 0, 0, 0));
+        }
+        
+        /* Combined message styling */
+        .message.assistant.combined {
+            background-color: white;
+            border-left: 4px solid #0070f3;
+            max-width: 95%;
+            padding: 0;
+        }
+        
+        .message.assistant.combined .message-content {
+            padding: 0;
+        }
+        
+        /* Structured part styling */
+        .structured-response {
+            background-color: #f8f9fa;
+            border-radius: 8px 8px 0 0;
+            padding: 15px;
+            border-bottom: 1px solid #e3e8ee;
+        }
+        
+        /* Conversational part styling */
+        .conversational-part {
+            background-color: #f1f1f1;
+            border-radius: 0 0 8px 8px;
+            padding: 15px;
+        }
     </style>
 </head>
 <body>
@@ -239,6 +386,12 @@
     <!-- Add basic error handling display -->
     <div id="error-display" style="position:fixed; bottom:0; right:0; background:rgba(255,0,0,0.1); padding:10px; max-width:50%; display:none;"></div>
 
+    <button id="debug-toggle" onclick="toggleDebug()">Toggle Debug</button>
+    <div id="debug-panel" style="display:none; position:fixed; top:10px; right:10px; background:white; border:1px solid #ccc; padding:10px; max-width:300px; z-index:10000;">
+        <strong>Debug Info</strong>
+        <div id="debug-output" style="max-height:200px; overflow-y:auto;"></div>
+    </div>
+
     <script src="/static/js/chat.js"></script>
     <script>
     // Show errors visibly on page
@@ -254,6 +407,11 @@
         debug.className = 'message system';
         debug.innerHTML = `<strong>DEBUG:</strong> ${msg}`;
         document.getElementById('messages-container').appendChild(debug);
+
+        // Also send to debug panel
+        const debugOutput = document.getElementById('debug-output');
+        debugOutput.innerHTML += `<div>${msg}</div>`;
+        debugOutput.scrollTop = debugOutput.scrollHeight; // Auto-scroll
     }
 
     // Override JSON.parse with a safe version
@@ -267,14 +425,15 @@
         }
     };
 
-    // Add a manual test button
+    // Replace the addTestButton function
     function addTestButton() {
         const btn = document.createElement('button');
         btn.innerText = 'Test Query';
         btn.style = 'position:fixed; top:10px; right:10px; z-index:1000;';
         btn.onclick = function() {
             debugDisplay('Running test query...');
-            fetch('http://localhost:8000/graph', {
+            // Update to use the new /query endpoint
+            fetch('http://localhost:8000/query', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({query: 'What are business models?'})
@@ -333,6 +492,13 @@
         } else {
             content.style.maxHeight = content.scrollHeight + "px";
             arrow.textContent = '▲';
+        }
+    }
+
+    function toggleDebug() {
+        const panel = document.getElementById('debug-panel');
+        if (panel) {
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
         }
     }
     </script>

@@ -109,17 +109,24 @@ def clarification_node(state: Dict[str, Any], interactive_callback=None) -> Dict
         clarification_result = generate_clarification_question(query, metadata)
         
         if (clarification_result.get("clarification_needed") and 
-            clarification_result.get("clarification_questions") and
-            interactive_callback):
+            clarification_result.get("clarification_questions")):
             
             question = clarification_result["clarification_questions"][0]
-            logger.info(f"Interactive callback: {question}")
 
-            return {
-                **state,
-                "status": "clarification_needed",
-                "clarification_question": question
-            }
+            # Store the question for future reference
+            if "metadata" not in state:
+                state["metadata"] = {}
+            state["metadata"]["last_clarification_question"] = question
+
+            # Make sure to explicitly set these fields
+            state["status"] = "clarification_needed"
+            state["clarification_question"] = question
+            
+            # Call the interactive callback if available
+            if interactive_callback:
+                interactive_callback(question)
+                
+            return state
         
         return state
         
@@ -129,4 +136,4 @@ def clarification_node(state: Dict[str, Any], interactive_callback=None) -> Dict
             state["errors"] = []
         state["errors"].append(f"Clarification error: {str(e)}")
         return state
-    
+

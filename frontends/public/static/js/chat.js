@@ -3,14 +3,45 @@ let waitingForClarification = false;
 let activeSessionId = null;
 
 const API_BASE = 'http://3.86.52.25:8000'; 
+const DEBUG = true;
+
+// Debug function
+function debug(label, data) {
+    if (!DEBUG) return;
+    console.log(`DEBUG - ${label}:`, data);
+    
+    // Also show in UI if we have a debug panel
+    const debugPanel = document.getElementById('debug-panel');
+    if (debugPanel) {
+        const entry = document.createElement('div');
+        entry.innerHTML = `<strong>${label}</strong>: ${JSON.stringify(data, null, 2)}`;
+        debugPanel.appendChild(entry);
+        debugPanel.scrollTop = debugPanel.scrollHeight;
+    }
+}
 
 // Core functions for the chat interface
 document.addEventListener('DOMContentLoaded', () => {
+    // Create debug panel
+    const debugPanel = document.createElement('div');
+    debugPanel.id = 'debug-panel';
+    debugPanel.style = 'position: fixed; bottom: 10px; right: 10px; width: 300px; height: 200px; background: #f5f5f5; border: 1px solid #ccc; overflow: auto; padding: 10px; font-size: 11px; z-index: 9999;';
+    document.body.appendChild(debugPanel);
+    
     // Get DOM elements
     const messagesContainer = document.getElementById('messages-container');
     const questionInput = document.getElementById('question-input');
     const sendButton = document.getElementById('send-button');
-    const typingIndicator = document.getElementById('typing-indicator');
+    
+    // Test API connection
+    fetch(`${API_BASE}/`)
+        .then(res => res.json())
+        .then(data => {
+            debug('API Connection Success', data);
+        })
+        .catch(err => {
+            debug('API Connection Error', err.message);
+        });
     
     // Attach event listener to send button
     sendButton.addEventListener('click', () => {
@@ -50,16 +81,26 @@ function sendQuestion() {
     input.value = '';
     disableInput();
 
-    fetch(`/api/graph`, {
+    debug('Sending question', { query: question });
+    
+    fetch(`${API_BASE}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: question })
+        body: JSON.stringify({ 
+            query: question,
+            metadata: {}
+        })
     })
-    .then(res => res.json())
+    .then(res => {
+        debug('Response status', { status: res.status });
+        return res.json();
+    })
     .then(data => {
-        handleApiResponse(data);
+        debug('Response data', data);
+        processApiResponse(data);
     })
     .catch(err => {
+        debug('Error', err);
         addMessage(`Error: ${err.message}`, 'system');
         resetConversationState();
     });
@@ -75,82 +116,45 @@ function submitClarification() {
     input.value = '';
     input.placeholder = 'Processing...';
     disableInput();
+    
+    debug('Submitting clarification', { 
+        session_id: activeSessionId,
+        answer: answer
+    });
 
-    fetch(`/api/clarify`, {
+    fetch(`${API_BASE}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            session_id: activeSessionId,
-            answer: answer
+            query: answer,
+            session_id: activeSessionId
         })
     })
-    .then(res => res.json())
+    .then(res => {
+        debug('Clarification response status', { status: res.status });
+        return res.json();
+    })
     .then(data => {
-        handleApiResponse(data);
+        debug('Clarification response data', data);
+        processApiResponse(data);
     })
     .catch(err => {
+        debug('Clarification error', err);
         addMessage(`Error: ${err.message}`, 'system');
         resetConversationState();
     });
 }
 
-// Fetch response from the API
-function fetchGraphResponse(question, metadata = null) {
-    // Use relative URL instead of hardcoded localhost
-    fetch(`/api/graph`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            query: question,
-            metadata: metadata 
-        })
-    })
-    .then(response => {
-        hideTypingIndicator();
-        
-        if (!response.ok) {
-            throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
-        }
-        
-        return response.json();
-    })
-    .then(data => {
-        handleApiResponse(data);
-    })
-    .catch(error => {
-        addMessage(`Error: ${error.message}`, 'system');
-        resetConversationState();
-    });
-}
-
-// Handle the API response
-function handleApiResponse(data) {
-    if (data.status === "clarification_needed") {
-        activeSessionId = data.session_id;
-        waitingForClarification = true;
-        
-        const question = data.clarification_question || "Please provide additional information";
-        addMessage(question, 'system');
-        
-        enableInput();
-        document.getElementById('question-input').focus();
-        document.getElementById('send-button').textContent = "Submit";
-        document.getElementById('question-input').placeholder = "Provide additional information...";
+// Process API response with comprehensive checks for all possible formats
+function processApiResponse(data) {
+    debug('Processing API response', data);
+    
+    // Check for clarification needed status or questions
+    if (data.status === "clarification_needed" || data.clarification_question) {
+        handleClarificationNeeded(data);
     } 
     else if (data.status === "complete") {
-        waitingForClarification = false;
-        activeSessionId = null;
-
-        document.getElementById('send-button').textContent = "Send";
-        document.getElementById('question-input').placeholder = "Ask a finance question...";
-
-        const formattedResponse = formatResponse(
-            data.result?.generated_response || data.result
-        );
-        addMessage(formattedResponse, 'assistant');
-
-        enableInput();
-        document.getElementById('question-input').focus();
+        handleCompletedResponse(data);
     }
     else if (data.status === "error") {
         const errorMsg = data.error || "Unknown error occurred";
@@ -158,28 +162,263 @@ function handleApiResponse(data) {
         resetConversationState();
     }
     else {
-        addMessage(`Error: Received unknown status '${data.status}' from server`, 'system');
+        addMessage(`Error: Received unknown response from server`, 'system');
         resetConversationState();
     }
 }
 
-// Reset conversation state
-function resetConversationState() {
-    activeSessionId = null;
-    waitingForClarification = false;
-
+// Handle clarification needed
+function handleClarificationNeeded(data) {
+    activeSessionId = data.session_id;
+    waitingForClarification = true;
+    
+    // Find clarification question - prioritize direct field
+    const question = data.clarification_question || 
+                     (data.result && data.result.clarification_question) ||
+                     "Please provide additional information";
+    
+    debug('Found clarification question', { question });
+    
+    // Display the question to the user
+    addMessage(question, 'system');
+    
+    // Update UI to show we're awaiting clarification
+    document.getElementById('send-button').textContent = "Submit";
+    document.getElementById('question-input').placeholder = "Provide additional information...";
     enableInput();
-    document.getElementById('send-button').textContent = "Send";
-    document.getElementById('question-input').placeholder = "Ask a finance question...";
-    document.getElementById('question-input').value = '';
+    document.getElementById('question-input').focus();
 }
 
-// Add a message to the chat
+// Handle completed response
+// Handle completed response
+function handleCompletedResponse(data) {
+    waitingForClarification = false;
+    activeSessionId = null;
+
+    // Reset UI elements
+    document.getElementById('send-button').textContent = "Send";
+    document.getElementById('question-input').placeholder = "Ask a finance question...";
+    
+    // Log the entire response to debug panel
+    debug("FULL RESPONSE", data);
+    
+    try {
+        // Get the result object - it should be in data.result
+        let result = data.result;
+        
+        debug("EXTRACTED RESULT", result);
+        
+        // Create a container for the entire message
+        let messageContent = document.createElement('div');
+        messageContent.className = 'message-content';
+        
+        let hasStructuredData = false;
+        let hasConversationalData = false;
+        
+        // FIRST: Add structured data if available
+        if (result && result.structured && result.structured.data) {
+            debug("ADDING STRUCTURED DATA", result.structured.data);
+            hasStructuredData = true;
+            
+            // Create structured section div
+            let structuredDiv = document.createElement('div');
+            structuredDiv.className = 'structured-response';
+            
+            // Add heading
+            let heading = document.createElement('h3');
+            heading.textContent = 'Detailed Analysis';
+            structuredDiv.appendChild(heading);
+            
+            // Process structured data
+            const structuredData = result.structured.data;
+            
+            // Add module1 data if exists
+            if (structuredData.module1) {
+                let module = structuredData.module1;
+                
+                // Overview section
+                if (module.overview) {
+                    let section = document.createElement('div');
+                    section.className = 'section';
+                    section.innerHTML = `<h4>Overview</h4><p>${module.overview}</p>`;
+                    structuredDiv.appendChild(section);
+                }
+                
+                // Model details as dropdown
+                if (module.model_details && module.model_details.length) {
+                    let details = document.createElement('details');
+                    details.className = 'dropdown-section';
+                    details.open = true;
+                    
+                    let summary = document.createElement('summary');
+                    summary.innerHTML = '<h4>Key Points</h4>';
+                    details.appendChild(summary);
+                    
+                    let ul = document.createElement('ul');
+                    module.model_details.forEach(detail => {
+                        let li = document.createElement('li');
+                        li.textContent = detail;
+                        ul.appendChild(li);
+                    });
+                    
+                    details.appendChild(ul);
+                    structuredDiv.appendChild(details);
+                }
+            }
+            
+            // Process other modules if they exist
+            Object.keys(structuredData).forEach(key => {
+                if (key !== 'module1' && structuredData[key]) {
+                    let moduleData = structuredData[key];
+                    let details = document.createElement('details');
+                    details.className = 'dropdown-section';
+                    
+                    let summary = document.createElement('summary');
+                    summary.innerHTML = `<h4>${key.replace('module', 'Module ')}</h4>`;
+                    details.appendChild(summary);
+                    
+                    let content = document.createElement('div');
+                    content.style.padding = '15px';
+                    
+                    if (typeof moduleData === 'object') {
+                        // Handle object data
+                        Object.keys(moduleData).forEach(subKey => {
+                            let subSection = document.createElement('div');
+                            subSection.innerHTML = `<strong>${subKey}:</strong> ${JSON.stringify(moduleData[subKey], null, 2)}`;
+                            content.appendChild(subSection);
+                        });
+                    } else {
+                        content.textContent = moduleData;
+                    }
+                    
+                    details.appendChild(content);
+                    structuredDiv.appendChild(details);
+                }
+            });
+            
+            // Add structured div to message content
+            messageContent.appendChild(structuredDiv);
+        }
+        
+        // SECOND: Add conversational content if available
+        if (result && result.conversational && result.conversational.data) {
+            debug("ADDING CONVERSATIONAL DATA", result.conversational.data);
+            hasConversationalData = true;
+            
+            // Add separator if we have both sections
+            if (hasStructuredData) {
+                let separator = document.createElement('hr');
+                separator.className = 'response-separator';
+                messageContent.appendChild(separator);
+            }
+            
+            // Create conversational section
+            let conversationalDiv = document.createElement('div');
+            conversationalDiv.className = 'conversational-part';
+            
+            // Format conversational content
+            const conversationalContent = typeof result.conversational.data === 'string' 
+                ? markdownToHtml(result.conversational.data)
+                : JSON.stringify(result.conversational.data, null, 2);
+            
+            conversationalDiv.innerHTML = conversationalContent;
+            messageContent.appendChild(conversationalDiv);
+        }
+        
+        // Fallback: If no structured or conversational data found, show what we have
+        if (!hasStructuredData && !hasConversationalData) {
+            debug("NO STRUCTURED/CONVERSATIONAL DATA FOUND, SHOWING FALLBACK");
+            
+            let fallbackDiv = document.createElement('div');
+            fallbackDiv.className = 'conversational-part';
+            
+            // Try to extract any text content
+            let content = '';
+            if (result && typeof result === 'string') {
+                content = result;
+            } else if (result && result.response) {
+                content = result.response;
+            } else if (result && result.text) {
+                content = result.text;
+            } else {
+                content = "I generated a response, but couldn't format it properly. Please try again.";
+            }
+            
+            fallbackDiv.innerHTML = markdownToHtml(content);
+            messageContent.appendChild(fallbackDiv);
+        }
+        
+        // Create the message div with combined class
+        let messageDiv = document.createElement('div');
+        messageDiv.className = 'message assistant combined';
+        messageDiv.appendChild(messageContent);
+        
+        // Add to messages container
+        document.getElementById('messages-container').appendChild(messageDiv);
+        
+        // Auto-scroll to the bottom
+        const messagesContainer = document.getElementById('messages-container');
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        
+    } catch (err) {
+        debug("ERROR IN RESPONSE PROCESSING", err.message);
+        // Fallback to a simple message display
+        addMessage("Sorry, there was an error processing the response. Please try again.", 'system');
+    }
+    
+    enableInput();
+    document.getElementById('question-input').focus();
+}
+// Add this helper function for markdown conversion
+function markdownToHtml(markdown) {
+    if (!markdown) return "";
+    
+    // Replace headers
+    let html = markdown
+        .replace(/##### (.*?)(\n|$)/g, '<h5>$1</h5>')
+        .replace(/#### (.*?)(\n|$)/g, '<h4>$1</h4>')
+        .replace(/### (.*?)(\n|$)/g, '<h3>$1</h3>')
+        .replace(/## (.*?)(\n|$)/g, '<h2>$1</h2>')
+        .replace(/# (.*?)(\n|$)/g, '<h1>$1</h1>');
+    
+    // Replace lists
+    html = html.replace(/^\s*[*-] (.*?)(\n|$)/gm, '<li>$1</li>');
+    html = html.replace(/<li>(.*?)<\/li>(\n<li>.*?<\/li>)+/g, '<ul>$&</ul>');
+    
+    // Replace paragraphs
+    html = html.replace(/^(?!<[uh]|<li)(.*?)(\n|$)/gm, '<p>$1</p>');
+    
+    return html;
+}
+
+// Add additional debug helper
+function debugPrintObject(obj, label) {
+    try {
+        debugDisplay(`${label}: ${JSON.stringify(obj, null, 2).substring(0, 500)}...`);
+    } catch (e) {
+        debugDisplay(`${label}: [Error stringifying object: ${e.message}]`);
+    }
+}
+
+// Update the addMessage function to support the "structured" class
 function addMessage(content, sender) {
     const messagesContainer = document.getElementById('messages-container');
     
     const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${sender}`;
+    
+    // Check if sender has additional classes (like "assistant structured")
+    const senderClasses = sender.split(' ');
+    const primarySender = senderClasses[0]; // "assistant" in "assistant structured"
+    
+    // Set the base class
+    messageDiv.className = `message ${primarySender}`;
+    
+    // Add any additional classes
+    if (senderClasses.length > 1) {
+        for (let i = 1; i < senderClasses.length; i++) {
+            messageDiv.classList.add(senderClasses[i]);
+        }
+    }
     
     const messageContent = document.createElement('div');
     messageContent.className = 'message-content';
@@ -197,397 +436,6 @@ function addMessage(content, sender) {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
-// Format the response
-function formatResponse(result) {
-    if (!result) return "No result received";
-    
-    // Handle undefined result
-    if (typeof result === 'undefined') {
-        return "Error: Received undefined response from server";
-    }
-    
-    // Check if we have the nested generated_response structure
-    if (result.generated_response) {
-        return formatResponse(result.generated_response);
-    }
-    
-    // Check if we have the structured/conversational format
-    if (result.structured && result.conversational) {
-        const structuredData = result.structured.data;
-        const conversationalData = result.conversational.data;
-        
-        if (!structuredData) {
-            return markdownToHtml(conversationalData) || "No data received";
-        }
-        
-        // Generate a unique ID for this message's tabs
-        const tabId = 'tab_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
-        
-        // Create tabs UI with unique IDs
-        let html = `
-        <div class="response-tabs" data-tab-group="${tabId}">
-            <button class="tab-btn active" onclick="switchTab(event, 'structured', '${tabId}')">Structured</button>
-            <button class="tab-btn" onclick="switchTab(event, 'conversational', '${tabId}')">Conversational</button>
-        </div>
-        `;
-        
-        // Structured tab content
-        html += `<div id="structured-tab-${tabId}" class="tab-content active">`;
-        
-        // Module 1
-        if (structuredData.module1) {
-            html += `
-            <div class="dropdown">
-                <div class="dropdown-header" onclick="toggleDropdown(this)">
-                    <h3>Key Concepts and Models</h3>
-                    <span class="dropdown-arrow">▼</span>
-                </div>
-                <div class="dropdown-content">
-                    <p>${structuredData.module1.overview || ""}</p>
-            `;
-            
-            // Model details
-            if (structuredData.module1.model_details?.length) {
-                html += `<h4>Model Details</h4><ul>`;
-                structuredData.module1.model_details.forEach(detail => {
-                    html += `<li>${detail}</li>`;
-                });
-                html += `</ul>`;
-            }
-            
-            // Model comparison
-            if (structuredData.module1.model_comparison?.headers) {
-                html += `<h4>Model Comparison</h4>
-                    <div class="table-wrapper">
-                        <table class="response-table">
-                            <thead>
-                                <tr>`;
-                
-                structuredData.module1.model_comparison.headers.forEach(header => {
-                    html += `<th>${header}</th>`;
-                });
-                
-                html += `</tr>
-                            </thead>
-                            <tbody>`;
-                
-                if (structuredData.module1.model_comparison.rows) {
-                    structuredData.module1.model_comparison.rows.forEach(row => {
-                        html += `<tr>`;
-                        row.forEach(cell => {
-                            html += `<td>${cell}</td>`;
-                        });
-                        html += `</tr>`;
-                    });
-                }
-                
-                html += `</tbody>
-                        </table>
-                    </div>`;
-            }
-            
-            // Examples
-            if (structuredData.module1.examples?.length) {
-                html += `<h4>Examples</h4><ul>`;
-                structuredData.module1.examples.forEach(example => {
-                    html += `<li>${example}</li>`;
-                });
-                html += `</ul>`;
-            }
-            
-            html += `</div></div>`;
-        }
-        
-        // Module 2
-        if (structuredData.module2) {
-            html += `
-            <div class="dropdown">
-                <div class="dropdown-header" onclick="toggleDropdown(this)">
-                    <h3>Strategic Shifts and Innovation</h3>
-                    <span class="dropdown-arrow">▼</span>
-                </div>
-                <div class="dropdown-content">`;
-            
-            if (structuredData.module2.major_events?.length) {
-                html += `<h4>Major Events</h4><ul>`;
-                structuredData.module2.major_events.forEach(event => {
-                    html += `<li>${event}</li>`;
-                });
-                html += `</ul>`;
-            }
-            
-            if (structuredData.module2.expert_opinions?.length) {
-                html += `<h4>Expert Opinions</h4><ul>`;
-                structuredData.module2.expert_opinions.forEach(opinion => {
-                    html += `<li>${opinion}</li>`;
-                });
-                html += `</ul>`;
-            }
-            
-            html += `</div></div>`;
-        }
-        
-        // Module 3
-        if (structuredData.module3) {
-            html += `
-            <div class="dropdown">
-                <div class="dropdown-header" onclick="toggleDropdown(this)">
-                    <h3>Trend Analysis</h3>
-                    <span class="dropdown-arrow">▼</span>
-                </div>
-                <div class="dropdown-content">`;
-            
-            if (structuredData.module3.key_trends?.length) {
-                html += `<h4>Key Trends</h4><ul>`;
-                structuredData.module3.key_trends.forEach(trend => {
-                    html += `<li>${trend}</li>`;
-                });
-                html += `</ul>`;
-            }
-            
-            if (structuredData.module3.associated_themes?.length) {
-                html += `<h4>Associated Themes</h4><ul>`;
-                structuredData.module3.associated_themes.forEach(theme => {
-                    html += `<li>${theme}</li>`;
-                });
-                html += `</ul>`;
-            }
-            
-            html += `</div></div>`;
-        }
-        
-        // Module 4
-        if (structuredData.module4) {
-            html += `
-            <div class="dropdown">
-                <div class="dropdown-header" onclick="toggleDropdown(this)">
-                    <h3>Global Context</h3>
-                    <span class="dropdown-arrow">▼</span>
-                </div>
-                <div class="dropdown-content">`;
-            
-            if (structuredData.module4.global_events?.length) {
-                html += `<h4>Global Events</h4><ul>`;
-                structuredData.module4.global_events.forEach(event => {
-                    html += `<li>${event}</li>`;
-                });
-                html += `</ul>`;
-            }
-            
-            if (structuredData.module4.global_model_shifts?.length) {
-                html += `<h4>Global Model Shifts</h4><ul>`;
-                structuredData.module4.global_model_shifts.forEach(shift => {
-                    html += `<li>${shift}</li>`;
-                });
-                html += `</ul>`;
-            }
-            
-            html += `</div></div>`;
-        }
-        
-        html += `</div>`;
-        
-        // Conversational tab content
-        html += `<div id="conversational-tab-${tabId}" class="tab-content">`;
-        html += markdownToHtml(conversationalData) || "<p>No conversational response available</p>";
-        html += `</div>`;
-        
-        // Add necessary styles
-        html += `
-        <style>
-            .response-tabs {
-                display: flex;
-                margin-bottom: 1rem;
-                border-bottom: 1px solid #ddd;
-            }
-            
-            .tab-btn {
-                padding: 0.5rem 1rem;
-                background: none;
-                border: none;
-                cursor: pointer;
-                font-size: 1rem;
-                border-bottom: 2px solid transparent;
-            }
-            
-            .tab-btn.active {
-                border-bottom: 2px solid #0070f3;
-                font-weight: bold;
-            }
-            
-            .tab-content {
-                display: none;
-                padding: 0.5rem;
-            }
-            
-            .tab-content.active {
-                display: block;
-            }
-            
-            #conversational-tab h1 {
-                font-size: 1.6rem;
-                margin-top: 1.2rem;
-                margin-bottom: 0.8rem;
-                color: #0070f3;
-            }
-            
-            #conversational-tab h2 {
-                font-size: 1.4rem;
-                margin-top: 1.1rem;
-                margin-bottom: 0.7rem;
-                color: #0076f5;
-            }
-            
-            #conversational-tab h3 {
-                font-size: 1.3rem;
-                margin-top: 1rem;
-                margin-bottom: 0.6rem;
-                color: #0080f7;
-            }
-            
-            #conversational-tab h4 {
-                font-size: 1.2rem;
-                margin-top: 0.9rem;
-                margin-bottom: 0.5rem;
-                color: #0088f9;
-            }
-            
-            #conversational-tab h5 {
-                font-size: 1.1rem;
-                margin-top: 0.8rem;
-                margin-bottom: 0.4rem;
-                color: #0092fb;
-            }
-            
-            #conversational-tab ul {
-                margin-left: 1.5rem;
-                margin-bottom: 1rem;
-            }
-            
-            #conversational-tab li {
-                margin-bottom: 0.3rem;
-            }
-            
-            #conversational-tab p {
-                margin-bottom: 1rem;
-            }
-            
-            .dropdown {
-                margin-bottom: 1rem;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                overflow: hidden;
-            }
-            
-            .dropdown-header {
-                padding: 0.75rem;
-                cursor: pointer;
-                background-color: #f9f9f9;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-            }
-            
-            .dropdown-header h3 {
-                margin: 0;
-                font-size: 1.1rem;
-                color: #0070f3;
-            }
-            
-            .dropdown-arrow {
-                font-size: 0.8rem;
-            }
-            
-            .dropdown-content {
-                padding: 0;
-                max-height: 0;
-                overflow: hidden;
-                transition: max-height 0.3s ease-out;
-            }
-            
-            .table-wrapper {
-                overflow-x: auto;
-                margin: 1rem 0;
-            }
-            
-            .response-table {
-                width: 100%;
-                border-collapse: collapse;
-            }
-            
-            .response-table th, .response-table td {
-                border: 1px solid #ddd;
-                padding: 8px;
-                text-align: left;
-            }
-            
-            .response-table th {
-                background-color: #f2f2f2;
-            }
-        </style>
-        `;
-        
-        return html;
-    }
-    
-    // Fallback to displaying JSON for other formats
-    try {
-        if (typeof result === 'string') {
-            return result;
-        } else {
-            return `<pre class="json-response">${JSON.stringify(result, null, 2)}</pre>`;
-        }
-    } catch (e) {
-        return "Error formatting response: " + e.message;
-    }
-}
-
-// Markdown to HTML converter
-function markdownToHtml(markdown) {
-    if (!markdown) return "";
-    
-    // Process headers (#### Heading -> <h4>Heading</h4>)
-    const withHeaders = markdown
-        .replace(/##### (.*?)(\n|$)/g, '<h5>$1</h5>')
-        .replace(/#### (.*?)(\n|$)/g, '<h4>$1</h4>')
-        .replace(/### (.*?)(\n|$)/g, '<h3>$1</h3>')
-        .replace(/## (.*?)(\n|$)/g, '<h2>$1</h2>')
-        .replace(/# (.*?)(\n|$)/g, '<h1>$1</h1>');
-    
-    // Process lists (- Item -> <li>Item</li>)
-    let inList = false;
-    let withLists = "";
-    withHeaders.split('\n').forEach(line => {
-        if (line.trim().match(/^- /)) {
-            if (!inList) {
-                withLists += "<ul>";
-                inList = true;
-            }
-            withLists += `<li>${line.trim().substring(2)}</li>`;
-        } else {
-            if (inList) {
-                withLists += "</ul>";
-                inList = false;
-            }
-            withLists += line + "\n";
-        }
-    });
-    if (inList) withLists += "</ul>";
-    
-    // Process paragraphs (empty line between paragraphs -> <p>paragraph</p>)
-    const withParagraphs = withLists
-        .replace(/\n\n/g, '</p><p>')
-        .replace(/^\s*(.+)/, '<p>$1');
-    
-    // If it doesn't end with </p>, add it
-    const trimmed = withParagraphs.trim();
-    if (!trimmed.endsWith('</p>') && !trimmed.endsWith('</ul>')) {
-        return trimmed + '</p>';
-    }
-    
-    return trimmed;
-}
-
 // Helper functions
 function disableInput() {
     document.getElementById('question-input').disabled = true;
@@ -597,53 +445,4 @@ function disableInput() {
 function enableInput() {
     document.getElementById('question-input').disabled = false;
     document.getElementById('send-button').disabled = false;
-}
-
-function showTypingIndicator() {
-    document.getElementById('typing-indicator').classList.remove('hidden');
-}
-
-function hideTypingIndicator() {
-    document.getElementById('typing-indicator').classList.add('hidden');
-}
-
-// Modified tab switching function to handle unique tab groups
-function switchTab(event, tabName, tabGroupId) {
-    // Get the parent tab group container
-    const tabGroup = event.currentTarget.closest('.response-tabs');
-    
-    // Find only the tab contents within this message's container
-    const messageContainer = tabGroup.parentElement;
-    const tabContents = messageContainer.querySelectorAll('.tab-content');
-    
-    // Hide all tab contents in this message
-    for (let i = 0; i < tabContents.length; i++) {
-        tabContents[i].classList.remove('active');
-    }
-    
-    // Remove active class from all tab buttons in this message
-    const tabButtons = tabGroup.querySelectorAll('.tab-btn');
-    for (let i = 0; i < tabButtons.length; i++) {
-        tabButtons[i].classList.remove('active');
-    }
-    
-    // Show the selected tab content and mark the button as active
-    const targetTab = document.getElementById(tabName + '-tab-' + tabGroupId);
-    if (targetTab) {
-        targetTab.classList.add('active');
-        event.currentTarget.classList.add('active');
-    }
-}
-
-function toggleDropdown(header) {
-    const content = header.nextElementSibling;
-    const arrow = header.querySelector('.dropdown-arrow');
-    
-    if (content.style.maxHeight) {
-        content.style.maxHeight = null;
-        arrow.textContent = '▼';
-    } else {
-        content.style.maxHeight = content.scrollHeight + "px";
-        arrow.textContent = '▲';
-    }
 }

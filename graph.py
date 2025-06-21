@@ -1,5 +1,5 @@
 from langgraph.graph import StateGraph
-from typing import TypedDict, Dict, Any, List, Optional, Annotated
+from typing import TypedDict, Dict, Any, List, Optional
 import os
 from dotenv import load_dotenv
 from datetime import datetime
@@ -8,19 +8,21 @@ from agents.refiner import get_refiner
 from agents.retrieval import RetrievalAgent
 from agents.raggen import run_rag_generator
 from agents.clarification import clarification_node, process_clarification_answer
-
+import operator
+import logging
 load_dotenv()
 
 class GraphState(TypedDict):
-    query: Annotated[str, "append"]
-    metadata: Dict[str, Any]
+    query: str  # Single value - no annotation needed
+    metadata: Dict[str, Any]  # Regular dictionary type without annotation
     intake_state: Optional[Dict[str, Any]]
     refined_query: Optional[Dict[str, Any]]
     retrieval_results: Optional[Dict[str, Any]]
     generated_response: Optional[Dict[str, Any]]
     clarification_question: Optional[str]
+    clarification_answers: Optional[List[Dict[str, str]]]  # No annotation
     status: Optional[str]
-    errors: Annotated[List[str], "append"]
+    errors: Optional[List[str]]  # No annotation
 
 def init_retrieval_agent():
     import urllib.parse
@@ -36,7 +38,8 @@ def init_retrieval_agent():
         neo4j_pass=os.getenv("NEO4J_PASSWORD")
     )
 
-def intake_node(state: GraphState, interactive_callback=None) -> GraphState:
+def intake_node(state: GraphState) -> GraphState:
+    """Process initial query intake"""
     try:
         query = state["query"]
         metadata = state["metadata"]
@@ -44,38 +47,122 @@ def intake_node(state: GraphState, interactive_callback=None) -> GraphState:
         result = process_intake({
             "query": query,
             "metadata": metadata
-        }, interactive=False)  # Always use False for interactive to avoid terminal prompts
+        }, interactive=False)
 
         if result["status"] == "error":
-            return {**state, "errors": [f"Intake error: {result['message']}"]}
+            return {
+                "errors": [f"Intake error: {result['message']}"],
+                "status": "error"
+            }
 
-        intake_state = result["data"]
-        
-        # No clarification check here - handled by clarification_node
-        return {**state, "intake_state": intake_state}
+        return {
+            "intake_state": result["data"],
+            "status": "intake_complete"
+        }
     except Exception as e:
-        return {**state, "errors": [f"Intake processing failed: {str(e)}"]}
+        return {
+            "errors": [f"Intake processing failed: {str(e)}"],
+            "status": "error"
+        }
+
+def clarification_node_wrapper(state: GraphState) -> GraphState:
+    """Wrapper around clarification node to ensure proper state handling"""
+    try:
+        # Get the query from state
+        query = state.get("query", "")
+        
+        # Get metadata
+        metadata = state.get("metadata", {})
+        
+        # Get intake state - add to metadata if needed
+        intake_state = state.get("intake_state")
+        if intake_state:
+            metadata["intake_state"] = intake_state
+        
+        # Create a single state object for the clarification node
+        clarification_state = {
+            "query": query,
+            "metadata": metadata
+        }
+        
+        # Call clarification node with the correct arguments
+        result = clarification_node(clarification_state)
+        
+        # Properly update state with result
+        updated_state = {**state}
+        
+        # Add clarification question if present
+        if "clarification_question" in result:
+            updated_state["clarification_question"] = result["clarification_question"]
+        
+        # Make sure we're not setting status to None
+        if "status" in result and result["status"]:
+            updated_state["status"] = result["status"]
+        
+        return updated_state
+    except Exception as e:
+        # Handle any exceptions
+        return {**state, "errors": state.get("errors", []) + [f"Clarification error: {str(e)}"]}
 
 def refine_node(state: GraphState) -> GraphState:
+    """Refine the query based on intake and clarifications"""
     try:
-        intake_state = state.get("intake_state", {})
+        metadata = state.get("metadata", {})
+        
+        # If we've already got clarifications, use them with the original query
+        if "clarifications" in metadata and metadata["clarifications"]:
+            # Either use intake_state or build minimal state with original query
+            if state.get("intake_state"):
+                intake_state = state.get("intake_state", {})
+                intake_state["metadata"] = metadata
+            else:
+                # Create a minimal intake state using the original query
+                original_query = metadata.get("original_query", state["query"])
+                intake_state = {
+                    "query": original_query,
+                    "metadata": metadata
+                }
+        else:
+            # Normal flow from intake
+            intake_state = state.get("intake_state", {})
+        
         refined = get_refiner().refine(intake_state)
+        
         if "error" in refined:
-            return {**state, "errors": state.get("errors", []) + [refined["error"]]}
-        return {**state, "refined_query": refined}
+            return {
+                "errors": [refined["error"]],
+                "status": "error"
+            }
+        
+        return {
+            "refined_query": refined,
+            "status": "refine_complete"
+        }
     except Exception as e:
-        return {**state, "errors": state.get("errors", []) + [f"Refine error: {str(e)}"]}
+        return {
+            "errors": [f"Refine error: {str(e)}"],
+            "status": "error"
+        }
 
 def retrieve_node(state: GraphState) -> GraphState:
+    """Retrieve relevant information"""
     try:
         refined_query = state.get("refined_query", {})
         retrieval_agent = init_retrieval_agent()
         results = retrieval_agent.retrieve(refined_query)
-        return {**state, "retrieval_results": results}
+        
+        return {
+            "retrieval_results": results,
+            "status": "retrieval_complete"
+        }
     except Exception as e:
-        return {**state, "errors": state.get("errors", []) + [f"Retrieval error: {str(e)}"]}
+        return {
+            "errors": [f"Retrieval error: {str(e)}"],
+            "status": "error"
+        }
 
 def generate_node(state: GraphState) -> GraphState:
+    """Generate final response"""
     try:
         result = run_rag_generator({
             "refined_query": state.get("refined_query", {"refined_query": state["query"]}),
@@ -83,111 +170,164 @@ def generate_node(state: GraphState) -> GraphState:
             "kg_paths": state.get("retrieval_results", {}).get("kg_paths", []),
             "kg_insights": state.get("retrieval_results", {}).get("kg_insights", [])
         })
-        return {**state, "generated_response": result}
+        logging.info(f"Generated response: {result}")
+        
+        # Ensure we have the minimum structure for the frontend
+        if isinstance(result, dict) and "structured" not in result and "conversational" not in result:
+            # Add some basic structure
+            result = {
+                "structured": {
+                    "data": {
+                        "module1": {
+                            "overview": result.get("response", "No detailed response available.")
+                        }
+                    }
+                },
+                "conversational": {
+                    "data": result.get("response", result.get("text", str(result)))
+                }
+            }
+        
+        return {
+            "generated_response": result,
+            "status": "complete"
+        }
     except Exception as e:
-        return {**state, "errors": state.get("errors", []) + [f"Generation error: {str(e)}"]}
+        return {
+            "errors": [f"Generation error: {str(e)}"],
+            "status": "error"
+        }
 
-def has_errors(state: GraphState) -> str:
-    return "error" if state.get("errors") else "continue"
+def should_continue(state: GraphState) -> str:
+    """Determine the next step in the graph based on current state"""
+    # Check for errors first
+    if state.get("errors"):
+        return "error"
+        
+    # For clarification node, check if we need clarification
+    if "clarification_question" in state and state["clarification_question"]:
+        return "needs_clarification"
+    
+    # Based on what's in the state, determine the appropriate "continue" key
+    if state.get("intake_state") and not state.get("refined_query"):
+        return "continue"  # After intake, go to clarification
+    elif state.get("refined_query") and not state.get("retrieval_results"):
+        return "continue_to_retrieve"  # After refine, go to retrieve
+    elif state.get("retrieval_results") and not state.get("generated_response"):
+        return "continue_to_generate"  # After retrieve, go to generate
+    elif state.get("generated_response"):
+        return "end"  # After generate, end the flow
+    
+    # Default fallback if nothing matches
+    return "continue"  # Use the most general continue case
 
-def build_graph(interactive_callback=None) -> StateGraph:
+def build_graph() -> StateGraph:
+    """Build the complete processing graph"""
     builder = StateGraph(GraphState)
     
-    # Add nodes
+    # Add all nodes
     builder.add_node("intake", intake_node)
-    builder.add_node("clarification", lambda state: clarification_node(state, interactive_callback))
+    builder.add_node("clarification", clarification_node_wrapper)
     builder.add_node("refine", refine_node)
     builder.add_node("retrieve", retrieve_node)
     builder.add_node("generate", generate_node)
-    builder.add_node("END", lambda state: {**state, "status": "completed"})
-    # Add a new endpoint specifically for clarification
-    builder.add_node("CLARIFY_END", lambda state: state)  # Keep the state as-is
-
-    # Define status router function
-    def status_router(state):
-        if state.get("errors"):
-            return "error"
-        elif state.get("status") == "clarification_needed":
-            return "needs_clarification"
-        else:
-            return "continue"
-
-    # Flow with clarification node and conditional routing
-    builder.add_edge("intake", "clarification")
     
-    # Route clarification to CLARIFY_END instead of END
+    # Set entry point
+    builder.set_entry_point("intake")
+    
+    # Define the flow with improved error handling
     builder.add_conditional_edges(
-        "clarification",
-        status_router,
+        "intake",
+        should_continue,
         {
-            "error": "END",
-            "needs_clarification": "CLARIFY_END",  # Use the new endpoint
-            "continue": "refine"
+            "error": "__end__",
+            "continue": "clarification",
+            # Add a fallback for unexpected values
+            "_fallback": "clarification"
         }
     )
     
-    builder.add_edge("refine", "retrieve")
-    builder.add_edge("retrieve", "generate")
-    builder.add_edge("generate", "END")
-
-    # Add conditional edges for other nodes
-    for node in ["intake", "refine", "retrieve", "generate"]:
-        builder.add_conditional_edges(
-            node, 
-            has_errors, 
-            {"error": "END", "continue": next_node(node)}
-        )
-
-    builder.set_entry_point("intake")
-    builder.set_finish_point("END")
+    builder.add_conditional_edges(
+        "clarification",
+        should_continue,
+        {
+            "error": "__end__",
+            "needs_clarification": "__end__",
+            "continue": "refine",  # Changed from "continue_to_refine" to "continue"
+            # Add a fallback for unexpected values
+            "_fallback": "refine"
+        }
+    )
+    
+    builder.add_conditional_edges(
+        "refine",
+        should_continue,
+        {
+            "error": "__end__",
+            "continue_to_retrieve": "retrieve"
+        }
+    )
+    
+    builder.add_conditional_edges(
+        "retrieve",
+        should_continue,
+        {
+            "error": "__end__",
+            "continue_to_generate": "generate"
+        }
+    )
+    
+    builder.add_conditional_edges(
+        "generate",
+        should_continue,
+        {
+            "error": "__end__",
+            "end": "__end__"
+        }
+    )
+    
     return builder.compile()
 
-def next_node(node):
-    return {
-        "intake": "clarification",  # Intake now goes to clarification
-        "clarification": "refine",   # Clarification goes to refine
-        "refine": "retrieve",
-        "retrieve": "generate",
-        "generate": "END"
-    }[node]
-
-def process_query(query: str, metadata: Dict[str, Any] = None, interactive_callback=None) -> Dict[str, Any]:
-    # Create a simplified callback wrapper to avoid multiple state updates
-    def callback_wrapper(question):
-        return lambda current_state: {
-            **current_state,
-            "status": "clarification_needed",
-            "clarification_question": question
+def process_query(query: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Process a new user query"""
+    try:
+        # Initialize the graph
+        graph = build_graph()
+        
+        # Run the graph with the query
+        result = graph.invoke({
+            "query": query,
+            "metadata": metadata or {},
+            "errors": []
+        })
+        
+        return result
+    except Exception as e:
+        return {
+            "status": "error", 
+            "errors": [f"Failed to process query: {str(e)}"]
         }
 
-    
-    # Use the wrapper when building the graph
-    graph = build_graph(callback_wrapper)
-    
-    # Always include an empty errors list to avoid None errors
-    result = graph.invoke({
-        "query": query,
-        "metadata": metadata or {},
-        "errors": []
-    })
-    
-    return result
-
-def process_clarification(session_id: str, clarification_answer: str, metadata: Dict[str, Any] = None, interactive_callback=None) -> Dict[str, Any]:
+def process_clarification(session_id: str, clarification_answer: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
     """Process a clarification answer and continue the graph execution"""
     try:
+        # Get the original query from metadata
+        original_query = metadata.get("original_query", "")
+        
         # Update metadata with the clarification answer
-        updated_metadata = process_clarification_answer("", clarification_answer, metadata or {})
+        updated_metadata = process_clarification_answer(original_query, clarification_answer, metadata or {})
         
-        # Create a graph that starts from the refine step
-        graph = build_graph(interactive_callback)
+        # Make sure we have the original query in metadata
+        if "original_query" not in updated_metadata and original_query:
+            updated_metadata["original_query"] = original_query
+            
+        # Create a new graph for complete processing (don't try to skip steps)
+        graph = build_graph()
         
-        # Use this to bypass the intake and clarification steps
-        refine_graph = graph.with_config(entry_point="refine")
-        
-        # IMPORTANT: Don't include query in the invoke call
-        result = refine_graph.invoke({
-            # "query": "",  # REMOVE THIS LINE
+        # Start fresh with the complete graph, but include all necessary context
+        # in metadata rather than trying to skip nodes
+        result = graph.invoke({
+            "query": original_query,  # Use the original query
             "metadata": updated_metadata,
             "errors": []
         })
@@ -199,59 +339,35 @@ def process_clarification(session_id: str, clarification_answer: str, metadata: 
             "errors": [f"Failed to process clarification: {str(e)}"]
         }
 
-if __name__ == "__main__":
-    # Example usage with interactive mode
-    query = input("Enter your query: ")
+# Test function for debugging
+def test_graph():
+    """Test the graph with a sample query"""
+    query = "Tell me about business models"
+    print(f"Testing query: {query}")
     
-    # Use a simple mock callback for testing in the terminal
-    def mock_interactive_callback(question):
-        print(f"\nCLARIFICATION NEEDED: {question}")
-        answer = input("Your answer: ")
-        return {
-            "status": "clarification_needed",
-            "clarification_question": question,
-            "session_id": "test-session",
-            "clarification_answer": answer
-        }
+    result = process_query(query)
     
-    result = process_query(query, interactive_callback=mock_interactive_callback)
-    
-    if result.get("errors"):
-        print(f"Errors occurred: {result['errors']}")
-    elif "generated_response" in result:
-        print("\n✅ Generated Response:")
-        response = result["generated_response"]
-        response = result["generated_response"]
-
-        if response["structured"]["status"] == "success":
-            structured_data = response["structured"]["data"]
-
-            print("\n=== Business Models ===")
-            print(structured_data.module1.overview)
-
-            # Display table if available
-            table = structured_data.module1.model_comparison
-            if table.headers and table.rows:
-                print("\n=== Comparison Table ===")
-                print(" | ".join(table.headers))
-                print("-" * (sum(len(h) for h in table.headers) + 3 * (len(table.headers) - 1)))
-                for row in table.rows:
-                    print(" | ".join(row))
-
-            print("\n=== Strategic Shifts ===")
-            for event in structured_data.module2.major_events:
-                print(f"- {event}")
-
-            print("\n=== Key Trends ===")
-            for trend in structured_data.module3.key_trends:
-                print(f"- {trend}")
+    if result.get("status") == "clarification_needed":
+        print(f"Clarification needed: {result.get('clarification_question')}")
+        
+        # Simulate answering the clarification
+        answer = "I want to know about SaaS business models"
+        print(f"Answering: {answer}")
+        
+        final_result = process_clarification("test", answer, result, {})
+        
+        if final_result.get("generated_response"):
+            print("✅ Success! Generated response received.")
         else:
-            print("Structured response failed:", response["structured"]["error"])
-        if response["conversational"]["status"] == "success":
-            conversational_data = response["conversational"]["data"]
-            print("\n=== Conversational Response ===")
-            print(conversational_data)
+            print("❌ Failed to generate response")
+            print("Errors:", final_result.get("errors"))
+    
+    elif result.get("generated_response"):
+        print("✅ Success! No clarification needed.")
+    
     else:
-        print("No generated response found.")
+        print("❌ Failed")
+        print("Errors:", result.get("errors"))
 
-        # ...
+if __name__ == "__main__":
+    test_graph()

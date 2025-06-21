@@ -7,6 +7,7 @@ import os
 import urllib.parse
 import logging
 from typing import Dict, List, Any, Optional
+from dotenv import load_dotenv
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -15,7 +16,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 from langchain_openai import OpenAIEmbeddings
 import os
-
+load_dotenv()
 class PromptSearcher:
     def __init__(self, qdrant_url: str, qdrant_key: str, collection_name: str = "prompt-guidance"):
         """Initialize the PromptSearcher with the correct collection name (hyphen, not underscore)"""
