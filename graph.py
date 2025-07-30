@@ -10,6 +10,12 @@ from agents.raggen import run_rag_generator
 from agents.clarification import clarification_node, process_clarification_answer
 import operator
 import logging
+import urllib.parse
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('graph_processor')
+
 load_dotenv()
 
 class GraphState(TypedDict):
@@ -25,24 +31,34 @@ class GraphState(TypedDict):
     errors: Optional[List[str]]  # No annotation
 
 def init_retrieval_agent():
-    import urllib.parse
-    username = os.getenv("MONGO_USERNAME")
-    password = urllib.parse.quote_plus(os.getenv("MONGO_PASSWORD"))
-    mongo_uri = f"mongodb+srv://{username}:{password}@veerive.tta8g.mongodb.net/"
-    return RetrievalAgent(
-        mongo_uri=mongo_uri,
-        qdrant_url=os.getenv("QDRANT_URL"),
-        qdrant_key=os.getenv("QDRANT_API"),
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USERNAME"),
-        neo4j_pass=os.getenv("NEO4J_PASSWORD")
-    )
+    """Initialize RetrievalAgent with enhanced PDF support and better error handling"""
+    try:
+        username = os.getenv("MONGO_USERNAME")
+        password = urllib.parse.quote_plus(os.getenv("MONGO_PASSWORD"))
+        mongo_uri = f"mongodb+srv://{username}:{password}@veerive.tta8g.mongodb.net/"
+        
+        return RetrievalAgent(
+            mongo_uri=mongo_uri,
+            qdrant_url=os.getenv("QDRANT_URL"),
+            qdrant_key=os.getenv("QDRANT_API"),
+            neo4j_uri=os.getenv("NEO4J_URI"),
+            neo4j_user=os.getenv("NEO4J_USERNAME"),
+            neo4j_pass=os.getenv("NEO4J_PASSWORD"),
+            qdrant_collection="tester2",  # Regular posts collection
+            pdf_collection="veerive_docs",  # PDF documents collection
+            embed_model="text-embedding-3-large"
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize retrieval agent: {str(e)}")
+        raise
 
 def intake_node(state: GraphState) -> GraphState:
     """Process initial query intake"""
     try:
         query = state["query"]
         metadata = state["metadata"]
+        
+        logger.info(f"Processing intake for query: {query[:100]}...")
 
         result = process_intake({
             "query": query,
@@ -50,16 +66,19 @@ def intake_node(state: GraphState) -> GraphState:
         }, interactive=False)
 
         if result["status"] == "error":
+            logger.error(f"Intake error: {result['message']}")
             return {
                 "errors": [f"Intake error: {result['message']}"],
                 "status": "error"
             }
 
+        logger.info("Intake processing completed successfully")
         return {
             "intake_state": result["data"],
             "status": "intake_complete"
         }
     except Exception as e:
+        logger.error(f"Intake processing failed: {str(e)}")
         return {
             "errors": [f"Intake processing failed: {str(e)}"],
             "status": "error"
@@ -109,6 +128,8 @@ def refine_node(state: GraphState) -> GraphState:
     try:
         metadata = state.get("metadata", {})
         
+        logger.info("Starting query refinement")
+        
         # If we've already got clarifications, use them with the original query
         if "clarifications" in metadata and metadata["clarifications"]:
             # Either use intake_state or build minimal state with original query
@@ -129,48 +150,78 @@ def refine_node(state: GraphState) -> GraphState:
         refined = get_refiner().refine(intake_state)
         
         if "error" in refined:
+            logger.error(f"Refinement error: {refined['error']}")
             return {
                 "errors": [refined["error"]],
                 "status": "error"
             }
         
+        logger.info("Query refinement completed successfully")
         return {
             "refined_query": refined,
             "status": "refine_complete"
         }
     except Exception as e:
+        logger.error(f"Refine error: {str(e)}")
         return {
             "errors": [f"Refine error: {str(e)}"],
             "status": "error"
         }
 
 def retrieve_node(state: GraphState) -> GraphState:
-    """Retrieve relevant information"""
+    """Retrieve relevant information using enhanced RetrievalAgent with PDF support"""
     try:
         refined_query = state.get("refined_query", {})
+        
+        logger.info(f"Starting retrieval for refined query: {refined_query.get('refined_query', '')[:100]}...")
+        
         retrieval_agent = init_retrieval_agent()
         results = retrieval_agent.retrieve(refined_query)
+        
+        # Log retrieval statistics
+        qdrant_count = len(results.get("qdrant_docs", []))
+        pdf_count = len(results.get("pdf_docs", []))
+        kg_insights_count = len(results.get("kg_insights", []))
+        kg_paths_count = len(results.get("kg_paths", []))
+        prompt_count = len(results.get("prompt", []))
+        
+        logger.info(f"Retrieval completed: {qdrant_count} vector docs, {pdf_count} PDF docs, "
+                   f"{kg_insights_count} KG insights, {kg_paths_count} KG paths, {prompt_count} prompts")
         
         return {
             "retrieval_results": results,
             "status": "retrieval_complete"
         }
     except Exception as e:
+        logger.error(f"Retrieval error: {str(e)}")
         return {
             "errors": [f"Retrieval error: {str(e)}"],
             "status": "error"
         }
 
 def generate_node(state: GraphState) -> GraphState:
-    """Generate final response"""
+    """Generate final response using enhanced retrieval results including PDF documents"""
     try:
-        result = run_rag_generator({
-            "refined_query": state.get("refined_query", {"refined_query": state["query"]}),
-            "qdrant_docs": state.get("retrieval_results", {}).get("qdrant_docs", []),
-            "kg_paths": state.get("retrieval_results", {}).get("kg_paths", []),
-            "kg_insights": state.get("retrieval_results", {}).get("kg_insights", [])
-        })
-        logging.info(f"Generated response: {result}")
+        retrieval_results = state.get("retrieval_results", {})
+        refined_query = state.get("refined_query", {"refined_query": state["query"]})
+        
+        # Prepare input for the generator with enhanced data sources
+        generator_input = {
+            "refined_query": refined_query,
+            "qdrant_docs": retrieval_results.get("qdrant_docs", []),
+            "pdf_docs": retrieval_results.get("pdf_docs", []),  # Include PDF documents
+            "kg_paths": retrieval_results.get("kg_paths", []),
+            "kg_insights": retrieval_results.get("kg_insights", []),
+            "prompt": retrieval_results.get("prompt", [])  # Include prompt guidance
+        }
+        
+        logger.info(f"Generating response with {len(generator_input['qdrant_docs'])} vector docs, "
+                   f"{len(generator_input['pdf_docs'])} PDF docs, and "
+                   f"{len(generator_input['kg_insights'])} KG insights")
+        
+        result = run_rag_generator(generator_input)
+        
+        logger.info("Response generation completed successfully")
         
         # Ensure we have the minimum structure for the frontend
         if isinstance(result, dict) and "structured" not in result and "conversational" not in result:
@@ -193,6 +244,7 @@ def generate_node(state: GraphState) -> GraphState:
             "status": "complete"
         }
     except Exception as e:
+        logger.error(f"Generation error: {str(e)}")
         return {
             "errors": [f"Generation error: {str(e)}"],
             "status": "error"
@@ -289,8 +341,10 @@ def build_graph() -> StateGraph:
     return builder.compile()
 
 def process_query(query: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Process a new user query"""
+    """Process a new user query with enhanced logging and error handling"""
     try:
+        logger.info(f"Starting query processing: {query[:100]}...")
+        
         # Initialize the graph
         graph = build_graph()
         
@@ -301,8 +355,10 @@ def process_query(query: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]
             "errors": []
         })
         
+        logger.info("Query processing completed successfully")
         return result
     except Exception as e:
+        logger.error(f"Failed to process query: {str(e)}")
         return {
             "status": "error", 
             "errors": [f"Failed to process query: {str(e)}"]
@@ -311,6 +367,8 @@ def process_query(query: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]
 def process_clarification(session_id: str, clarification_answer: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
     """Process a clarification answer and continue the graph execution"""
     try:
+        logger.info(f"Processing clarification answer for session {session_id}")
+        
         # Get the original query from metadata
         original_query = metadata.get("original_query", "")
         
@@ -332,8 +390,10 @@ def process_clarification(session_id: str, clarification_answer: str, metadata: 
             "errors": []
         })
         
+        logger.info("Clarification processing completed successfully")
         return result
     except Exception as e:
+        logger.error(f"Failed to process clarification: {str(e)}")
         return {
             "status": "error", 
             "errors": [f"Failed to process clarification: {str(e)}"]

@@ -159,6 +159,11 @@ class PromptGuidanceHandler:
         logger.info("Starting prompt guidance processing")
         documents = self.fetch_documents()
         logger.info(f"Found {len(documents)} documents to process")
+        results = self.qdrant.get_points(
+            collection_name=QdrantConfig.QDRANT_COLLECTION,
+            with_vectors=False,
+            with_payload=True
+        )
         
         for doc in documents:
             self.vectorize_and_upsert(doc)

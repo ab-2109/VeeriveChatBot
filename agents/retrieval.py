@@ -202,6 +202,7 @@ class RetrievalAgent:
     def __init__(self, mongo_uri: str, qdrant_url: str, qdrant_key: str,
                  neo4j_uri: str, neo4j_user: str, neo4j_pass: str,
                  qdrant_collection: str = "tester2",
+                 pdf_collection: str = "veerive_docs",  # Add PDF collection
                  embed_model: str = "text-embedding-3-large"):
 
         # MongoDB
@@ -221,6 +222,7 @@ class RetrievalAgent:
         # Qdrant
         self.qdrant_client = QdrantClient(url=qdrant_url, api_key=qdrant_key)
         self.qdrant_collection = qdrant_collection
+        self.pdf_collection = pdf_collection  # Store PDF collection name
 
         self.embedder = OpenAIEmbeddings(model=embed_model, api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -232,17 +234,24 @@ class RetrievalAgent:
 
 
     def retrieve_from_qdrant(self, query_text: str, top_k: int = 5):
-        query_vector = self.embedder.embed_query(query_text)
-        hits = self.qdrant_client.search(
-            collection_name=self.qdrant_collection,
-            query_vector=query_vector,
-            limit=5,
-            with_payload=True,
-            with_vectors=False,
-            timeout=10,
-            score_threshold=0.55,
-        )
-        return hits
+        """Retrieve from regular posts collection with enhanced scoring"""
+        try:
+            query_vector = self.embedder.embed_query(query_text)
+            hits = self.qdrant_client.search(
+                collection_name=self.qdrant_collection,
+                query_vector=query_vector,
+                limit=top_k,
+                with_payload=True,
+                with_vectors=False,
+                timeout=10,
+                score_threshold=0.55,
+            )
+            
+            logger.info(f"Found {len(hits)} regular document results")
+            return hits
+        except Exception as e:
+            logger.error(f"Error retrieving from regular collection: {str(e)}")
+            return []
     
     def retrieve_prompt(self, query_text: str, top_k: int = 1):
         """Retrieve prompt guidance from Qdrant based on the query text with better error handling"""
@@ -474,7 +483,7 @@ class RetrievalAgent:
 
 
     def retrieve(self, refined_query: dict):
-        """Retrieve relevant information using all available data sources"""
+        """Retrieve relevant information using all available data sources with separate handling for PDFs"""
         query_text = refined_query.get("refined_query", refined_query.get("original_query", ""))
         tags = refined_query.get("tags", {})
         print(f"Tags: {tags}")
@@ -483,30 +492,294 @@ class RetrievalAgent:
         # Store the current tags for use in retrieve_prompt
         self.current_tags = tags
         
-        # Get results from Qdrant vector search
-        qdrant_results = self.retrieve_from_qdrant(query_text)
-        chunks = []
-        for result in qdrant_results:
-            chunks.append("chunk_" + str(result.payload['postId']))
-            
-        # Get graph insights using the reasoner
+        # Retrieve from regular posts and PDF documents separately
+        regular_results = self.retrieve_from_qdrant(query_text, top_k=8)
+        pdf_results = self.retrieve_from_pdf_docs(query_text, top_k=5)
+        
+        # Process regular chunks for graph reasoning
+        regular_chunks = []
+        regular_docs_formatted = []
+        
+        for result in regular_results:
+            chunk_id = "chunk_" + str(result.payload['postId'])
+            regular_chunks.append(chunk_id)
+            regular_docs_formatted.append({
+                'id': result.payload['postId'],
+                'text': result.payload.get('text', result.payload.get('content', '')),
+                'score': result.score,
+                'source': 'regular_post',
+                'metadata': result.payload
+            })
+        
+        # Process PDF chunks with enhanced formatting and categorization
+        pdf_docs_processed = self.process_pdf_results(pdf_results)
+        
+        # Get graph insights using the reasoner (only for regular posts that have graph connections)
         reasoner_results = self.kg_reasoner.reason(tags)
         
-        # Get direct graph paths
-        neo4j_paths = self.trace_knowledge_paths(chunks, 1)
-        pathscontext = convert_paths_to_natural_language(neo4j_paths)
+        # Get direct graph paths (only for regular chunks that have graph relationships)
+        neo4j_paths = []
+        pathscontext = []
+        if regular_chunks:
+            neo4j_paths = self.trace_knowledge_paths(regular_chunks, 1)
+            pathscontext = convert_paths_to_natural_language(neo4j_paths)
 
         # Retrieve prompt guidance with error handling
         prompt_results = self.retrieve_prompt(query_text, 1)
         
         return {
             "refined_query": refined_query,
-            "qdrant_docs": qdrant_results,
+            "qdrant_docs": regular_docs_formatted,  # Only regular posts for normal processing
+            "pdf_docs": pdf_docs_processed,  # Specially processed PDF documents
+            "pdf_content": self.format_pdf_content(pdf_docs_processed),  # Formatted PDF content
             "kg_insights": reasoner_results,
             "kg_paths": pathscontext,
             "prompt": prompt_results,
         }
     
+    def retrieve_from_pdf_docs(self, query_text: str, top_k: int = 5):
+        """Retrieve relevant PDF document chunks with enhanced filtering and scoring"""
+        try:
+            query_vector = self.embedder.embed_query(query_text)
+            
+            # Check if collection exists
+            collections = self.qdrant_client.get_collections().collections
+            collection_names = [c.name for c in collections]
+            
+            if self.pdf_collection not in collection_names:
+                logger.warning(f"PDF collection '{self.pdf_collection}' does not exist in Qdrant")
+                return []
+            
+            # Use higher limit to get more candidates for filtering
+            search_limit = min(top_k * 3, 20)
+            
+            hits = self.qdrant_client.search(
+                collection_name=self.pdf_collection,
+                query_vector=query_vector,
+                limit=search_limit,
+                with_payload=True,
+                with_vectors=False,
+                timeout=10,
+                score_threshold=0.5,  # Lower threshold for PDFs as they might be more diverse
+            )
+            
+            # Apply additional filtering for PDF documents
+            filtered_hits = []
+            current_tags = getattr(self, 'current_tags', {})
+            
+            for hit in hits:
+                payload = hit.payload
+                text_content = payload.get('chunk_text', '').lower()
+                
+                # Basic relevance check
+                relevance_boost = 0
+                
+                # Check for tag matches
+                if current_tags.get('sector'):
+                    if current_tags['sector'].lower() in text_content:
+                        relevance_boost += 0.1
+                
+                if current_tags.get('country'):
+                    if current_tags['country'].lower() in text_content:
+                        relevance_boost += 0.1
+                
+                # Boost tables for business model queries
+                if payload.get('is_table') and current_tags.get('query_type', '').lower() == 'business models':
+                    relevance_boost += 0.15
+                
+                # Apply boost to score
+                adjusted_score = hit.score + relevance_boost
+                hit.score = min(adjusted_score, 1.0)  # Cap at 1.0
+                
+                filtered_hits.append(hit)
+            
+            # Sort by adjusted score and return top_k
+            filtered_hits.sort(key=lambda x: x.score, reverse=True)
+            final_hits = filtered_hits[:top_k]
+            
+            logger.info(f"Found {len(final_hits)} PDF document results (from {len(hits)} candidates)")
+            return final_hits
+            
+        except Exception as e:
+            logger.error(f"Error retrieving from PDF documents: {str(e)}")
+            return []
+
+    def format_pdf_content(self, pdf_chunks: list) -> str:
+        """Format PDF chunks into specialized content sections for the generator"""
+        if not pdf_chunks:
+            return ""
+        
+        formatted_content = "\n\n=== SPECIALIZED PDF DOCUMENT INSIGHTS ===\n\n"
+        
+        # Separate tables and text content
+        tables = [doc for doc in pdf_chunks if doc['is_table']]
+        text_docs = [doc for doc in pdf_chunks if not doc['is_table']]
+        
+        # Group by document title
+        docs_by_title = {}
+        for doc in pdf_chunks:
+            title = doc['title']
+            if title not in docs_by_title:
+                docs_by_title[title] = {
+                    'title': title,
+                    'url': doc['source_url'],
+                    'tables': [],
+                    'text_chunks': [],
+                    'max_score': 0
+                }
+            
+            docs_by_title[title]['max_score'] = max(docs_by_title[title]['max_score'], doc['score'])
+            
+            if doc['is_table']:
+                docs_by_title[title]['tables'].append(doc)
+            else:
+                docs_by_title[title]['text_chunks'].append(doc)
+        
+        # Sort documents by relevance
+        sorted_docs = sorted(docs_by_title.values(), key=lambda x: x['max_score'], reverse=True)
+        
+        # Format each document section
+        for i, doc_info in enumerate(sorted_docs[:3]):  # Top 3 most relevant documents
+            formatted_content += f"PDF Document {i+1}: {doc_info['title']}\n"
+            formatted_content += f"Source: {doc_info['url']}\n"
+            formatted_content += f"Relevance Score: {doc_info['max_score']:.3f}\n\n"
+            
+            # Add table data first (often most structured)
+            if doc_info['tables']:
+                formatted_content += "📊 TABLE DATA:\n"
+                for table in doc_info['tables'][:2]:  # Max 2 tables per document
+                    formatted_content += f"{table['formatted_content']}\n"
+                formatted_content += "\n"
+            
+            # Add text content
+            if doc_info['text_chunks']:
+                formatted_content += "📄 TEXT CONTENT:\n"
+                for chunk in doc_info['text_chunks'][:2]:  # Max 2 text chunks per document
+                    formatted_content += f"{chunk['formatted_content'][:800]}...\n\n"
+            
+            formatted_content += "=" * 50 + "\n\n"
+        
+        # Add summary section for high-level insights
+        if len(pdf_chunks) > 0:
+            high_score_docs = [doc for doc in pdf_chunks if doc['score'] > 0.75]
+            if high_score_docs:
+                formatted_content += "🔍 HIGH CONFIDENCE PDF INSIGHTS:\n"
+                for doc in high_score_docs[:3]:
+                    formatted_content += f"• {doc['title']}: {doc['formatted_content'][:200]}...\n"
+                formatted_content += "\n"
+        
+        return formatted_content
+    
+    def process_pdf_results(self, pdf_results: list) -> list:
+        """Process PDF results with enhanced categorization and formatting"""
+        processed_pdfs = []
+        
+        for result in pdf_results:
+            payload = result.payload
+            
+            # Extract and categorize PDF content
+            pdf_doc = {
+                'id': payload.get('doc_id', str(result.id)),
+                'title': payload.get('doc_title', 'Unknown PDF'),
+                'text': payload.get('chunk_text', ''),
+                'score': result.score,
+                'is_table': payload.get('is_table', False),
+                'source_url': payload.get('source_url', ''),
+                'post_type': payload.get('post_type', ''),
+                'sentiment': payload.get('sentiment', ''),
+                'chunk_id': payload.get('chunk_id', 0),
+                'source': 'pdf_document'
+            }
+            
+            # Add content type classification
+            if pdf_doc['is_table']:
+                pdf_doc['content_type'] = 'table'
+                pdf_doc['formatted_content'] = self.format_table_content(pdf_doc['text'])
+            else:
+                pdf_doc['content_type'] = 'text'
+                pdf_doc['formatted_content'] = self.format_text_content(pdf_doc['text'])
+            
+            # Add relevance indicators
+            pdf_doc['relevance_score'] = self.calculate_pdf_relevance(pdf_doc, self.current_tags)
+            
+            processed_pdfs.append(pdf_doc)
+        
+        # Sort by combined score (original score + relevance)
+        processed_pdfs.sort(
+            key=lambda x: (x['score'] * 0.7 + x['relevance_score'] * 0.3), 
+            reverse=True
+        )
+        
+        logger.info(f"Processed {len(processed_pdfs)} PDF documents with enhanced formatting")
+        return processed_pdfs
+    
+    def format_table_content(self, table_text: str) -> str:
+        """Format table content for better readability"""
+        if not table_text:
+            return ""
+        
+        # Add table formatting indicators
+        formatted = f"[TABLE DATA]\n{table_text}\n[/TABLE DATA]"
+        return formatted
+    
+    def format_text_content(self, text: str) -> str:
+        """Format text content with better structure"""
+        if not text:
+            return ""
+        
+        # Clean and structure the text
+        cleaned_text = text.strip()
+        
+        # Add paragraph breaks for long text
+        if len(cleaned_text) > 500:
+            # Try to break at sentence endings
+            sentences = cleaned_text.split('. ')
+            if len(sentences) > 3:
+                mid_point = len(sentences) // 2
+                cleaned_text = '. '.join(sentences[:mid_point]) + '.\n\n' + '. '.join(sentences[mid_point:])
+        
+        return cleaned_text
+    
+    def calculate_pdf_relevance(self, pdf_doc: dict, tags: dict) -> float:
+        """Calculate additional relevance score for PDF documents based on tags"""
+        relevance_score = 0.0
+        
+        text_content = pdf_doc['text'].lower()
+        title_content = pdf_doc['title'].lower()
+        
+        # Check for tag matches in content
+        if tags.get('sector'):
+            sector = tags['sector'].lower()
+            if sector in text_content:
+                relevance_score += 0.3
+            if sector in title_content:
+                relevance_score += 0.2
+        
+        if tags.get('country'):
+            country = tags['country'].lower()
+            if country in text_content:
+                relevance_score += 0.2
+            if country in title_content:
+                relevance_score += 0.15
+        
+        if tags.get('company'):
+            company = tags['company'].lower()
+            if company in text_content:
+                relevance_score += 0.25
+            if company in title_content:
+                relevance_score += 0.2
+        
+        if tags.get('subsector'):
+            subsector = tags['subsector'].lower()
+            if subsector in text_content:
+                relevance_score += 0.15
+        
+        # Bonus for tables when looking for business models or financial data
+        query_type = tags.get('query_type', '').lower()
+        if pdf_doc['is_table'] and ('business model' in query_type or 'financial' in query_type):
+            relevance_score += 0.2
+        
+        return min(relevance_score, 1.0)  # Cap at 1.0
 def convert_paths_to_natural_language(path_rows):
     """
     Convert raw Cypher query results into readable natural language sentences.
@@ -570,9 +843,22 @@ if __name__ == "__main__":
     }
 
     results = retrieval_agent.retrieve(refined_query)
-    print(f"Found {len(results['qdrant_docs'])} vector search results")
+    print(f"Found {len(results['qdrant_docs'])} regular document results")
+    print(f"Found {len(results['pdf_docs'])} PDF document results")
     print(f"Found {len(results['kg_insights'])} knowledge graph insights")
     print(f"Found {len(results['kg_paths'])} direct graph paths")
-    print(f"Results: {results}")
+    
+    # Show regular documents
+    print("\n=== REGULAR DOCUMENTS ===")
     for doc in results['qdrant_docs']:
-        print("ID:", doc.payload['postId'], "score:", doc.score)
+        print(f"ID: {doc['id']}, Score: {doc['score']:.3f}, Source: {doc['source']}")
+    
+    # Show PDF documents with enhanced info
+    print("\n=== PDF DOCUMENTS ===")
+    for doc in results['pdf_docs']:
+        print(f"Title: {doc['title']}, Score: {doc['score']:.3f}, Type: {doc['content_type']}, Relevance: {doc['relevance_score']:.3f}")
+    
+    # Show formatted PDF content
+    if results['pdf_content']:
+        print("\n=== FORMATTED PDF CONTENT (first 500 chars) ===")
+        print(results['pdf_content'][:500] + "...")
