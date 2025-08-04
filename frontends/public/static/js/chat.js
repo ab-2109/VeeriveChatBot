@@ -2,7 +2,7 @@
 let waitingForClarification = false;
 let activeSessionId = null;
 
-const API_BASE = 'https://54.205.162.22.nip.io'; 
+const API_BASE = 'http://54.205.162.22.nip.io'; 
 const DEBUG = true;
 
 // Debug function
