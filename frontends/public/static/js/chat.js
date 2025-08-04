@@ -350,37 +350,6 @@ function markdownToHtml(markdown) {
         .replace(/## (.*?)(\n|$)/g, '<h2>$1</h2>')
         .replace(/# (.*?)(\n|$)/g, '<h1>$1</h1>');
     
-        messageDiv.className = 'message assistant combined';
-        messageDiv.appendChild(messageContent);
-        
-        // Add to messages container
-        document.getElementById('messages-container').appendChild(messageDiv);
-        
-        // Auto-scroll to the bottom
-        const messagesContainer = document.getElementById('messages-container');
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        
-    } catch (err) {
-        debug("ERROR IN RESPONSE PROCESSING", err.message);
-        // Fallback to a simple message display
-        addMessage("Sorry, there was an error processing the response. Please try again.", 'system');
-    }
-    
-    enableInput();
-    document.getElementById('question-input').focus();
-}
-// Add this helper function for markdown conversion
-function markdownToHtml(markdown) {
-    if (!markdown) return "";
-    
-    // Replace headers
-    let html = markdown
-        .replace(/##### (.*?)(\n|$)/g, '<h5>$1</h5>')
-        .replace(/#### (.*?)(\n|$)/g, '<h4>$1</h4>')
-        .replace(/### (.*?)(\n|$)/g, '<h3>$1</h3>')
-        .replace(/## (.*?)(\n|$)/g, '<h2>$1</h2>')
-        .replace(/# (.*?)(\n|$)/g, '<h1>$1</h1>');
-    
     // Replace lists
     html = html.replace(/^\s*[*-] (.*?)(\n|$)/gm, '<li>$1</li>');
     html = html.replace(/<li>(.*?)<\/li>(\n<li>.*?<\/li>)+/g, '<ul>$&</ul>');
