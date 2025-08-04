@@ -2,7 +2,7 @@
 let waitingForClarification = false;
 let activeSessionId = null;
 
-const API_BASE = 'https://3.86.52.25.nip.io'; 
+const API_BASE = 'https://54.205.162.22.nip.io'; 
 const DEBUG = true;
 
 // Debug function
@@ -194,145 +194,84 @@ function handleClarificationNeeded(data) {
 function handleCompletedResponse(data) {
     waitingForClarification = false;
     activeSessionId = null;
-
-    // Reset UI elements
     document.getElementById('send-button').textContent = "Send";
     document.getElementById('question-input').placeholder = "Ask a finance question...";
-    
-    // Log the entire response to debug panel
     debug("FULL RESPONSE", data);
-    
     try {
-        // Get the result object - it should be in data.result
         let result = data.result;
-        
-        debug("EXTRACTED RESULT", result);
-        
-        // Create a container for the entire message
+        // If result is a JSON string, parse it
+        if (typeof result === 'string') {
+            try {
+                result = JSON.parse(result);
+            } catch (e) {
+                // Not JSON, fallback to string
+            }
+        }
+        debug("PARSED RESULT", result);
         let messageContent = document.createElement('div');
         messageContent.className = 'message-content';
-        
         let hasStructuredData = false;
         let hasConversationalData = false;
-        
-        // FIRST: Add structured data if available
+        let hasPDFData = false;
+        // --- Structured Data ---
         if (result && result.structured && result.structured.data) {
-            debug("ADDING STRUCTURED DATA", result.structured.data);
             hasStructuredData = true;
-            
-            // Create structured section div
             let structuredDiv = document.createElement('div');
             structuredDiv.className = 'structured-response';
-            
-            // Add heading
             let heading = document.createElement('h3');
             heading.textContent = 'Detailed Analysis';
             structuredDiv.appendChild(heading);
-            
-            // Process structured data
             const structuredData = result.structured.data;
-            
-            // Add module1 data if exists
-            if (structuredData.module1) {
-                let module = structuredData.module1;
-                
-                // Overview section
-                if (module.overview) {
+            // Render tables if present
+            if (structuredData.table) {
+                structuredDiv.innerHTML += renderTable(structuredData.table);
+            }
+            // Render other modules as before
+            Object.keys(structuredData).forEach(key => {
+                if (key !== 'table' && structuredData[key]) {
                     let section = document.createElement('div');
                     section.className = 'section';
-                    section.innerHTML = `<h4>Overview</h4><p>${module.overview}</p>`;
+                    section.innerHTML = `<strong>${key}:</strong> ${JSON.stringify(structuredData[key], null, 2)}`;
                     structuredDiv.appendChild(section);
                 }
-                
-                // Model details as dropdown
-                if (module.model_details && module.model_details.length) {
-                    let details = document.createElement('details');
-                    details.className = 'dropdown-section';
-                    details.open = true;
-                    
-                    let summary = document.createElement('summary');
-                    summary.innerHTML = '<h4>Key Points</h4>';
-                    details.appendChild(summary);
-                    
-                    let ul = document.createElement('ul');
-                    module.model_details.forEach(detail => {
-                        let li = document.createElement('li');
-                        li.textContent = detail;
-                        ul.appendChild(li);
-                    });
-                    
-                    details.appendChild(ul);
-                    structuredDiv.appendChild(details);
-                }
-            }
-            
-            // Process other modules if they exist
-            Object.keys(structuredData).forEach(key => {
-                if (key !== 'module1' && structuredData[key]) {
-                    let moduleData = structuredData[key];
-                    let details = document.createElement('details');
-                    details.className = 'dropdown-section';
-                    
-                    let summary = document.createElement('summary');
-                    summary.innerHTML = `<h4>${key.replace('module', 'Module ')}</h4>`;
-                    details.appendChild(summary);
-                    
-                    let content = document.createElement('div');
-                    content.style.padding = '15px';
-                    
-                    if (typeof moduleData === 'object') {
-                        // Handle object data
-                        Object.keys(moduleData).forEach(subKey => {
-                            let subSection = document.createElement('div');
-                            subSection.innerHTML = `<strong>${subKey}:</strong> ${JSON.stringify(moduleData[subKey], null, 2)}`;
-                            content.appendChild(subSection);
-                        });
-                    } else {
-                        content.textContent = moduleData;
-                    }
-                    
-                    details.appendChild(content);
-                    structuredDiv.appendChild(details);
-                }
             });
-            
-            // Add structured div to message content
             messageContent.appendChild(structuredDiv);
         }
-        
-        // SECOND: Add conversational content if available
+        // --- PDF Content ---
+        if (result && result.pdf_content) {
+            hasPDFData = true;
+            let pdfDiv = document.createElement('div');
+            pdfDiv.className = 'pdf-content-block';
+            let heading = document.createElement('h3');
+            heading.textContent = 'PDF Extracts';
+            pdfDiv.appendChild(heading);
+            // pdf_content can be array or object
+            let pdfSections = Array.isArray(result.pdf_content) ? result.pdf_content : [result.pdf_content];
+            pdfSections.forEach(section => {
+                pdfDiv.innerHTML += renderPDFSection(section);
+            });
+            messageContent.appendChild(pdfDiv);
+        }
+        // --- Conversational Data ---
         if (result && result.conversational && result.conversational.data) {
-            debug("ADDING CONVERSATIONAL DATA", result.conversational.data);
             hasConversationalData = true;
-            
-            // Add separator if we have both sections
-            if (hasStructuredData) {
+            if (hasStructuredData || hasPDFData) {
                 let separator = document.createElement('hr');
                 separator.className = 'response-separator';
                 messageContent.appendChild(separator);
             }
-            
-            // Create conversational section
             let conversationalDiv = document.createElement('div');
             conversationalDiv.className = 'conversational-part';
-            
-            // Format conversational content
             const conversationalContent = typeof result.conversational.data === 'string' 
                 ? markdownToHtml(result.conversational.data)
                 : JSON.stringify(result.conversational.data, null, 2);
-            
             conversationalDiv.innerHTML = conversationalContent;
             messageContent.appendChild(conversationalDiv);
         }
-        
-        // Fallback: If no structured or conversational data found, show what we have
-        if (!hasStructuredData && !hasConversationalData) {
-            debug("NO STRUCTURED/CONVERSATIONAL DATA FOUND, SHOWING FALLBACK");
-            
+        // --- Fallback ---
+        if (!hasStructuredData && !hasConversationalData && !hasPDFData) {
             let fallbackDiv = document.createElement('div');
             fallbackDiv.className = 'conversational-part';
-            
-            // Try to extract any text content
             let content = '';
             if (result && typeof result === 'string') {
                 content = result;
@@ -343,13 +282,74 @@ function handleCompletedResponse(data) {
             } else {
                 content = "I generated a response, but couldn't format it properly. Please try again.";
             }
-            
             fallbackDiv.innerHTML = markdownToHtml(content);
             messageContent.appendChild(fallbackDiv);
         }
-        
-        // Create the message div with combined class
         let messageDiv = document.createElement('div');
+        messageDiv.className = 'message assistant combined';
+        messageDiv.appendChild(messageContent);
+        document.getElementById('messages-container').appendChild(messageDiv);
+        const messagesContainer = document.getElementById('messages-container');
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    } catch (err) {
+        debug("ERROR IN RESPONSE PROCESSING", err.message);
+        addMessage("Sorry, there was an error processing the response. Please try again.", 'system');
+    }
+    enableInput();
+    document.getElementById('question-input').focus();
+}
+
+// --- Helper: Render Table ---
+function renderTable(tableData) {
+    if (!Array.isArray(tableData) || tableData.length === 0) return '';
+    let html = '<table class="response-table"><thead><tr>';
+    // Table headers from keys of first row
+    Object.keys(tableData[0]).forEach(key => {
+        html += `<th>${key}</th>`;
+    });
+    html += '</tr></thead><tbody>';
+    tableData.forEach(row => {
+        html += '<tr>';
+        Object.values(row).forEach(val => {
+            html += `<td>${val}</td>`;
+        });
+        html += '</tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+}
+
+// --- Helper: Render PDF Section ---
+function renderPDFSection(pdfSection) {
+    let html = '<div class="pdf-section">';
+    if (pdfSection.title) {
+        html += `<h4 class="pdf-title">${pdfSection.title}</h4>`;
+    }
+    if (pdfSection.page) {
+        html += `<div class="pdf-page">Page: ${pdfSection.page}</div>`;
+    }
+    if (pdfSection.content) {
+        html += `<div class="pdf-content">${markdownToHtml(pdfSection.content)}</div>`;
+    }
+    if (pdfSection.table) {
+        html += renderTable(pdfSection.table);
+    }
+    html += '</div>';
+    return html;
+}
+
+// Add this helper function for markdown conversion
+function markdownToHtml(markdown) {
+    if (!markdown) return "";
+    
+    // Replace headers
+    let html = markdown
+        .replace(/##### (.*?)(\n|$)/g, '<h5>$1</h5>')
+        .replace(/#### (.*?)(\n|$)/g, '<h4>$1</h4>')
+        .replace(/### (.*?)(\n|$)/g, '<h3>$1</h3>')
+        .replace(/## (.*?)(\n|$)/g, '<h2>$1</h2>')
+        .replace(/# (.*?)(\n|$)/g, '<h1>$1</h1>');
+    
         messageDiv.className = 'message assistant combined';
         messageDiv.appendChild(messageContent);
         
