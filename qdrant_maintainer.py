@@ -373,4 +373,4 @@ def run_scheduler():
         logger.info("Scheduler stopped by user.")
 
 if __name__ == "__main__":
-    run_scheduler()
+    run_once_with_retries()
