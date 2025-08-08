@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import hashlib
 from typing import List, Dict, Any, Optional, Union
 from bson import ObjectId
 from dotenv import load_dotenv
@@ -118,16 +119,13 @@ class PromptGuidanceHandler:
 
             logger.info(f"Processing: {title}")
             logger.info(f"Sector: {sector_name} | Subsector: {subsector_name}")
-            
             if not prompt or not sector_name:
                 logger.warning(f"[Skip] Empty prompt or sector for: {title}")
                 return
 
-            # Compose weighted query
             combined_text = f"{sector_name} {subsector_name} {prompt}".strip()
             embedding = self.embedder.embed_query(combined_text)
 
-            # Create payload
             payload = {
                 "id": doc.get("id", ""),
                 "title": title,
@@ -138,14 +136,15 @@ class PromptGuidanceHandler:
                 "updatedAt": str(doc.get("updatedAt")),
             }
 
-            # Generate a stable ID based on the document's ID if available, or create a new one
-            point_id = doc.get("id", uuid.uuid4().hex)
-            
+            # Stable deterministic integer ID from document ID for dedup/upsert
+            stable_id_source = doc.get("id", uuid.uuid4().hex)
+            point_id = int(hashlib.md5(stable_id_source.encode()).hexdigest(), 16) % (2**63)
+
             self.qdrant.upsert(
                 collection_name=QdrantConfig.QDRANT_COLLECTION,
                 points=[
                     models.PointStruct(
-                        id=str(uuid.uuid4()),
+                        id=point_id,
                         vector=embedding,
                         payload=payload
                     )
@@ -155,20 +154,44 @@ class PromptGuidanceHandler:
         except Exception as e:
             logger.error(f"[Error] {doc.get('id', 'unknown')} => {str(e)}")
 
-    def run(self):
-        logger.info("Starting prompt guidance processing")
+    # New helper: scroll existing IDs (if needed externally)
+    def list_existing_ids(self) -> set:
+        existing = set()
+        offset = None
+        while True:
+            points, offset = self.qdrant.scroll(
+                collection_name=QdrantConfig.QDRANT_COLLECTION,
+                limit=200,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False
+            )
+            if not points:
+                break
+            for p in points:
+                pl = p.payload or {}
+                pid = pl.get("id") or p.id
+                existing.add(str(pid))
+            if offset is None:
+                break
+        return existing
+
+    def upsert_missing(self, existing_ids: set):
+        """Upsert only documents whose id not already in existing_ids."""
         documents = self.fetch_documents()
-        logger.info(f"Found {len(documents)} documents to process")
-        results = self.qdrant.get_points(
-            collection_name=QdrantConfig.QDRANT_COLLECTION,
-            with_vectors=False,
-            with_payload=True
-        )
-        
+        new_docs = [d for d in documents if d.get("id") and d.get("id") not in existing_ids]
+        logger.info(f"Prompt guidance new docs: {len(new_docs)} (existing skipped: {len(documents)-len(new_docs)})")
+        for doc in new_docs:
+            self.vectorize_and_upsert(doc)
+        logger.info("✅ Prompt guidance upsert_missing complete.")
+
+    def run(self):
+        """Backward-compatible full upsert (no dedup check beyond deterministic ID)."""
+        logger.info("Starting prompt guidance processing (full run)")
+        documents = self.fetch_documents()
         for doc in documents:
             self.vectorize_and_upsert(doc)
-        
-        logger.info("✅ All prompts upserted successfully.")
+        logger.info("✅ All prompts upserted successfully (run mode).")
 
 if __name__ == "__main__":
     handler = PromptGuidanceHandler()

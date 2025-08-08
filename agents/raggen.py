@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import langchain
 from langchain.callbacks.manager import CallbackManager
+import re
+from langchain_core.messages import AIMessage, BaseMessage
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -24,8 +26,6 @@ logger = logging.getLogger('raggen_agent')
 load_dotenv()
 
 # === Initialize LLM ===
-llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=os.getenv("OPENAI_API_KEY"))
-
 # === Define Structured Output Format ===
 class TableData(BaseModel):
     headers: List[str]
@@ -55,6 +55,11 @@ class FullRAGResponse(BaseModel):
     module3: Module3TrendAnalyzer = Field(..., description="Trend analysis in the industry, sector or subsector")
     module4: Module4GlobalTrends = Field(..., description="International Analysis and global trends")
 
+llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=os.getenv("OPENAI_API_KEY"))
+# Use a separate LLM instance for structured output to ensure correct behavior
+llm_struct = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=os.getenv("OPENAI_API_KEY")) \
+    .with_structured_output(FullRAGResponse)
+
 # Initialize output parser
 parser = PydanticOutputParser(pydantic_object=FullRAGResponse)
 
@@ -67,44 +72,46 @@ def get_user_convo_history(session_id: str) -> ChatMessageHistory:
     return convo_buffers[session_id]
 
 # === Helper Functions ===
+
 def dedupe_chunks(chunks: List[Any], memory_texts: Optional[Set[str]] = None) -> tuple[str, Set[str]]:
-    """Enhanced chunk deduplication that handles both regular posts and PDF documents"""
+    """Deduplicate and budget context; supports posts + PDF docs. Caps total size to ~12k chars."""
     if memory_texts is None:
         memory_texts = set()
-    seen_hashes = set()
-    context = []
-    for chunk in chunks:
+    seen_hashes: Set[str] = set()
+    context: List[str] = []
+    total_budget = 12000
+    per_chunk_cap = 1500
+    used = 0
+
+    for chunk in chunks or []:
         text = ""
-        
-        # Handle Qdrant search results with payload
         if hasattr(chunk, 'payload'):
             payload = chunk.payload or {}
-            # Check for different text fields in order of preference
-            text = (payload.get("chunk", "") or 
-                   payload.get("chunk_text", "") or  # PDF documents
-                   payload.get("summary", "") or 
-                   payload.get("content", ""))
-                   
-        # Handle dictionary format (e.g., from PDF processing)
+            text = (payload.get("chunk", "") or
+                    payload.get("chunk_text", "") or
+                    payload.get("summary", "") or
+                    payload.get("content", ""))
         elif isinstance(chunk, dict):
-            text = (chunk.get("text", "") or 
-                   chunk.get("chunk_text", "") or
-                   chunk.get("content", "")).strip()
-                   
-        # Handle string format
+            text = (chunk.get("text", "") or
+                    chunk.get("chunk_text", "") or
+                    chunk.get("formatted_content", "") or
+                    chunk.get("content", "")).strip()
         else:
-            text = str(chunk).strip()
-            
+            text = str(chunk or "").strip()
         if not text:
             continue
-            
+        text = text[:per_chunk_cap]
         h = hashlib.md5(text.encode()).hexdigest()
-        if h not in seen_hashes and h not in memory_texts:
-            context.append(text)
-            seen_hashes.add(h)
-            memory_texts.add(h)
-            
+        if h in seen_hashes or h in memory_texts:
+            continue
+        if used + len(text) + 5 > total_budget:
+            break
+        context.append(text)
+        used += len(text) + 5
+        seen_hashes.add(h)
+        memory_texts.add(h)
     return "\n\n---\n\n".join(context), memory_texts
+
 
 def format_pdf_content(pdf_docs: List[Dict[str, Any]]) -> str:
     """Format PDF document content for inclusion in the prompt"""
@@ -208,7 +215,6 @@ def get_custom_prompt(input_data: Dict[str, Any]) -> Optional[str]:
                 if isinstance(custom_prompt[0], str) and len(custom_prompt[0].strip()) > 10:
                     logger.info("Using first prompt from list of strings")
                     return custom_prompt[0]
-                    
     except Exception as e:
         logger.error(f"Error processing custom prompt: {str(e)}")
         import traceback
@@ -239,90 +245,65 @@ Module 4: Global Comparisons / Broader Context
 
 IMPORTANT : Use natural language and include tables or bullets if necessary. Cite source titles or entities whenever you use specific facts.
            The output provided by you must be grounded in the context provided. Any fact or data not present in the context is not permissible.
-           Atleast 200 lines of content must be generated for each module. More is appreciated.
-           Provide citations for all the facts and data you provide.
-           Do not return without citations and atleast reaching 200 lines of content.
+           Try for 200 lines of content must be generated for each module. More is appreciated.
+           Try providing citations for all the facts and data you provide.
 
 Respond in JSON as per the specified schema.
 """
 
-default_convo_system_message = "You are a finance expert analyst. Answer the query in a detailed, structured format. Answer in form of a analysis report, include tables if needed. Explain everything but remain grounded."
+default_convo_system_message = "You are a finance expert analyst. Answer the query in a detailed, structured format. Answer in form of a analysis report, include tables if needed. Explain everything but remain grounded. Always included references and citations for all the facts and data you provide. Try explaining the concepts in a way that is easy to understand for a non-expert."
 
 # === RAG Chain Builders ===
+
 def build_structured_rag_chain():
+    """Builds the chain for generating a structured JSON response."""
     format_instructions = parser.get_format_instructions()
     
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", "{system_message}"),
+        MessagesPlaceholder("history"),
+        ("human", "{question}\n\n=== QDRANT CONTEXT ===\n{chunks}\n\n{pdf_content}\n\n=== CITABLE GRAPH PATHS ===\n{paths}\n\nRespond in JSON as per this schema:\n{format_instructions}")
+    ])
+
     return (
         {
-            "question": lambda inputs: inputs,  # Pass through the entire input
-            "chunks": lambda inputs: inputs.get("qdrant_docs", []),
-            "pdf_docs": lambda inputs: inputs.get("pdf_docs", []),  # Handle PDF documents
-            "paths": lambda inputs: format_kg_paths(inputs.get("kg_paths", []))
+            "input_data": RunnablePassthrough()
         }
         | RunnableLambda(lambda data: {
-            # Extract the refined query
-            "question": data["question"].get("refined_query", {}).get("refined_query", 
-                      data["question"].get("original_query", "Query not found")),
-            "chunks": dedupe_chunks(data["chunks"], data.setdefault("memory_texts", set()))[0],
-            "pdf_content": format_pdf_content(data["pdf_docs"]),  # Format PDF content
-            "paths": data["paths"],
+            "question": data["input_data"].get("refined_query", {}).get("refined_query", "Query not found"),
+            "chunks": dedupe_chunks(data["input_data"].get("qdrant_docs", []), set())[0],
+            "pdf_content": format_pdf_content(data["input_data"].get("pdf_docs", [])),
+            "paths": format_kg_paths(data["input_data"].get("kg_paths", [])),
+            "system_message": get_custom_prompt(data["input_data"]) or structured_system_message,
             "format_instructions": format_instructions,
-            "memory_texts": data["memory_texts"],
-            "history": [],  # Always provide history
-            "system_message": get_custom_prompt(data["question"]) or structured_system_message  # Use custom prompt if available
+            "history": [] # Placeholder for RunnableWithMessageHistory
         })
-        | RunnableLambda(lambda data: {
-            **data,
-            "prompt": ChatPromptTemplate.from_messages([
-                ("system", data["system_message"]),
-                MessagesPlaceholder("history"),
-                ("human", "{question}\n\n=== QDRANT CONTEXT ===\n{chunks}\n\n{pdf_content}\n\n=== CITABLE GRAPH PATHS ===\n{paths}\n\nRespond in JSON as per this schema:\n{format_instructions}")
-            ])
-        })
-        | RunnableLambda(lambda data: data["prompt"].format(
-            question=data["question"],
-            chunks=data["chunks"],
-            pdf_content=data["pdf_content"],
-            paths=data["paths"],
-            format_instructions=data["format_instructions"],
-            history=data["history"]
-        ))
-        | llm
-        | StrOutputParser()
+        | prompt_template
+        | llm_struct
+        | RunnableLambda(lambda pydantic_obj: pydantic_obj.dict())
     )
 
 def build_convo_rag_chain():
+    """Builds the chain for generating a conversational text response."""
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", "{system_message}"),
+        MessagesPlaceholder("history"),
+        ("human", "{question}\n\nRelevant Chunks:\n{chunks}\n\n{pdf_content}\n\nGraph Paths:\n{paths}")
+    ])
+
     return (
         {
-            "question": lambda inputs: inputs["refined_query"]["refined_query"] if "refined_query" in inputs and "refined_query" in inputs["refined_query"] else "",
-            "chunks": lambda inputs: inputs.get("qdrant_docs", []),
-            "pdf_docs": lambda inputs: inputs.get("pdf_docs", []),  # Handle PDF documents
-            "paths": lambda inputs: format_kg_paths(inputs.get("kg_paths", []))
+            "input_data": RunnablePassthrough()
         }
         | RunnableLambda(lambda data: {
-            "question": data["question"],
-            "chunks": dedupe_chunks(data["chunks"], data.setdefault("memory_texts", set()))[0],
-            "pdf_content": format_pdf_content(data["pdf_docs"]),  # Format PDF content
-            "paths": data["paths"],
-            "memory_texts": data["memory_texts"],
-            "history": [],
-            "system_message": get_custom_prompt(data) or default_convo_system_message  # Use custom prompt if available
+            "question": data["input_data"].get("refined_query", {}).get("refined_query", "Query not found"),
+            "chunks": dedupe_chunks(data["input_data"].get("qdrant_docs", []), set())[0],
+            "pdf_content": format_pdf_content(data["input_data"].get("pdf_docs", [])),
+            "paths": format_kg_paths(data["input_data"].get("kg_paths", [])),
+            "system_message": get_custom_prompt(data["input_data"]) or default_convo_system_message,
+            "history": [] # Placeholder for RunnableWithMessageHistory
         })
-        | RunnableLambda(lambda data: {
-            **data,
-            "prompt": ChatPromptTemplate.from_messages([
-                ("system", data["system_message"]),
-                MessagesPlaceholder("history"),
-                ("human", "{question}\n\nRelevant Chunks:\n{chunks}\n\n{pdf_content}\n\nGraph Paths:\n{paths}")
-            ])
-        })
-        | RunnableLambda(lambda data: data["prompt"].format(
-            question=data["question"],
-            chunks=data["chunks"],
-            pdf_content=data["pdf_content"],
-            paths=data["paths"],
-            history=data["history"]
-        ))
+        | prompt_template
         | llm
         | StrOutputParser()
     )
@@ -340,43 +321,45 @@ structured_chain_with_memory = RunnableWithMessageHistory(
 convo_chain_with_memory = RunnableWithMessageHistory(
     convo_rag_chain,
     get_session_history=get_user_convo_history,
-    input_messages_key="question",
+    input_messages_key="input_data", # The whole dict is the input
     history_messages_key="history"
 )
 
+
 def generate_structured_response(input_data: Dict[str, Any], session_id: str = "default"):
-    """Generate structured response with enhanced error handling and logging"""
+    """Generates a structured response with robust error handling."""
     try:
-        logger.info(f"Generating structured response for session: {session_id}")
-        
-        # Log input data statistics
         qdrant_count = len(input_data.get("qdrant_docs", []))
         pdf_count = len(input_data.get("pdf_docs", []))
-        kg_paths_count = len(input_data.get("kg_paths", []))
-        
-        logger.info(f"Input data: {qdrant_count} vector docs, {pdf_count} PDF docs, {kg_paths_count} KG paths")
-        
+        logger.info(f"Generating structured response with {qdrant_count} vector docs and {pdf_count} PDF docs.")
+
+        # The chain now directly returns a dictionary or raises an error.
         result = structured_chain_with_memory.invoke(input_data, config={"configurable": {"session_id": session_id}})
-        structured_result = parser.parse(result)
         
-        logger.info("Structured response generated successfully")
-        return {"status": "success", "data": structured_result}
+        if isinstance(result, dict):
+            return {"status": "success", "data": result}
+        
+        # This case should ideally not be hit if the chain is correct.
+        raise TypeError(f"Expected a dictionary from the structured chain, but got {type(result)}")
+
     except Exception as e:
-        logger.error(f"Structured parsing error: {str(e)}")
-        return {"status": "error", "message": f"Structured parsing error: {str(e)}"}
+        logger.error(f"Structured response generation failed: {e}", exc_info=True)
+        return {"status": "error", "data": None, "message": f"Structured generation failed: {str(e)}"}
+
 
 def generate_conversational_response(input_data: Dict[str, Any], session_id: str = "default"):
-    """Generate conversational response with enhanced error handling and logging"""
+    """Generate conversational response. The chain now correctly returns a string."""
     try:
         logger.info(f"Generating conversational response for session: {session_id}")
         
-        result = convo_chain_with_memory.invoke(input_data, config={"configurable": {"session_id": session_id}})
+        # The conversational chain now correctly returns a string.
+        result_text = convo_chain_with_memory.invoke(input_data, config={"configurable": {"session_id": session_id}})
         
-        logger.info("Conversational response generated successfully")
-        return {"status": "success", "data": result}
+        logger.info("Conversational response generated successfully.")
+        return {"status": "success", "data": result_text}
     except Exception as e:
-        logger.error(f"Conversational generation error: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Conversational generation error: {str(e)}", exc_info=True)
+        return {"status": "error", "data": "Failed to generate response.", "message": str(e)}
 
 def run_rag_generator(input_data: Dict[str, Any], session_id: str = "default"):
     """Generate both structured and conversational responses with enhanced logging and error handling."""
@@ -391,7 +374,7 @@ def run_rag_generator(input_data: Dict[str, Any], session_id: str = "default"):
     pdf_count = len(input_data.get("pdf_docs", []))
     kg_paths_count = len(input_data.get("kg_paths", []))
     kg_insights_count = len(input_data.get("kg_insights", []))
-    prompt_count = len(input_data.get("prompt", []))
+    prompt_count = len(input_data.get("prompt", []) if isinstance(input_data.get("prompt"), list) else 0)
     
     logger.info(f"Query: {query[:100]}...")
     logger.info(f"Resources: {qdrant_count} vector docs, {pdf_count} PDFs, {kg_paths_count} KG paths, "
@@ -401,30 +384,41 @@ def run_rag_generator(input_data: Dict[str, Any], session_id: str = "default"):
     structured_response = generate_structured_response(input_data, session_id)
     convo_response = generate_conversational_response(input_data, session_id)
     
-    # Create a combined result
+    # PDF content for frontend - format PDF content separately to ensure it's available
+    pdf_content = format_pdf_content(input_data.get("pdf_docs", []))
+    
+    # Create a combined result with safe defaults for all fields
     result = {
         "structured": {
-            "status": structured_response["status"],
-            "data": structured_response.get("data", None),
-            "error": structured_response.get("message", None) if structured_response["status"] == "error" else None
+            "status": structured_response.get("status", "error"),
+            "data": structured_response.get("data", {}),
+            "error": structured_response.get("message", None) if structured_response.get("status", "") == "error" else None
         },
         "conversational": {
-            "status": convo_response["status"],
-            "data": convo_response.get("data", None),
-            "error": convo_response.get("message", None) if convo_response["status"] == "error" else None
-        }
+            "status": convo_response.get("status", "error"),
+            "data": convo_response.get("data", "No response generated"),
+            "error": convo_response.get("message", None) if convo_response.get("status", "") == "error" else None
+        },
+        "pdf_content": pdf_content
     }
     
     # Log any errors that occurred
-    if structured_response["status"] == "error":
-        logger.warning(f"Structured output failed: {structured_response['message']}")
-    if convo_response["status"] == "error":
-        logger.warning(f"Conversational output failed: {convo_response['message']}")
+    if structured_response.get("status", "") == "error":
+        logger.warning(f"Structured output failed: {structured_response.get('message', 'Unknown error')}")
+    if convo_response.get("status", "") == "error":
+        logger.warning(f"Conversational output failed: {convo_response.get('message', 'Unknown error')}")
+    
+    # Debug log the full response structure (truncated for readability)
+    logger.info(f"Response structure - structured status: {result['structured']['status']}, " +
+                f"conversational status: {result['conversational']['status']}, " +
+                f"pdf_content length: {len(result['pdf_content'])}")
     
     # Check if at least one response succeeded
-    if structured_response["status"] == "error" and convo_response["status"] == "error":
-        logger.error("Both response types failed")
-        raise Exception(f"RAG generation failed: Both response types failed.")
+    if (structured_response.get("status", "") == "error" and 
+        convo_response.get("status", "") == "error" and
+        not pdf_content):
+        logger.error("All response types failed")
+        raise Exception(f"RAG generation failed: All response types failed.")
     
     logger.info("RAG generation completed successfully")
     return result

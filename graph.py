@@ -414,7 +414,13 @@ def test_graph():
         answer = "I want to know about SaaS business models"
         print(f"Answering: {answer}")
         
-        final_result = process_clarification("test", answer, result, {})
+        # Fix: Pass metadata as a dictionary containing result data
+        metadata = {
+            "original_query": query,
+            "clarification_question": result.get("clarification_question")
+        }
+        
+        final_result = process_clarification("test", answer, metadata)
         
         if final_result.get("generated_response"):
             print("✅ Success! Generated response received.")

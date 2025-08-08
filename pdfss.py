@@ -219,3 +219,54 @@ def run_ingestion():
 
 if __name__ == "__main__":
     run_ingestion()
+
+
+def run_ingestion_filtered(allowed_ids: set):
+    """Run ingestion only for posts whose _id is in allowed_ids. If allowed_ids empty, do nothing."""
+    if not allowed_ids:
+        print("[INFO] No new PDFs to process.")
+        return 0
+    total_docs = collection.count_documents({"_id": {"$in": list(allowed_ids)}})
+    print(f"[INFO] Filtered ingestion: {total_docs} docs to process")
+    docs = collection.find({
+        "_id": {"$in": list(allowed_ids)},
+        "googleDriveUrl": {"$exists": True, "$ne": None, "$ne": ""}
+    })
+
+    processed = 0
+    for doc in docs:
+        url = doc.get("googleDriveUrl", "")
+        title = doc.get("postTitle", "Untitled")
+        file_id = extract_file_id(url)
+        if not file_id:
+            print(f"[!] Skipping invalid URL: {url}")
+            continue
+        try:
+            print(f"[+] Processing (filtered): {title}")
+            pdf_path = download_pdf(file_id)
+            text_chunks, table_chunks = extract_text_and_tables(pdf_path)
+
+            meta_base = {
+                "doc_id": str(doc["_id"]),
+                "doc_title": title,
+                "source_url": url,
+                "post_type": doc.get("postType", ""),
+                "sentiment": doc.get("sentiment", ""),
+                "source": "gdrive"
+            }
+
+            if text_chunks:
+                text_embeddings = embed_chunks(text_chunks)
+                upsert_to_qdrant(text_chunks, text_embeddings, meta_base, is_table=False)
+
+            if table_chunks:
+                table_embeddings = embed_chunks(table_chunks)
+                upsert_to_qdrant(table_chunks, table_embeddings, meta_base, is_table=True)
+
+            collection.update_one({"_id": doc["_id"]}, {"$set": {"embedded": True}})
+            processed += 1
+
+        except Exception as e:
+            print(f"[ERROR] Failed processing {title}: {e}")
+            continue
+    return processed

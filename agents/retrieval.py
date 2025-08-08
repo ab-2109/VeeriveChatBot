@@ -17,6 +17,37 @@ from qdrant_client.http import models as qdrant_models
 from langchain_openai import OpenAIEmbeddings
 import os
 load_dotenv()
+
+def convert_paths_to_natural_language(path_rows):
+    """
+    Standalone helper to convert Neo4j path query rows into natural language.
+    Exported so agents.__init__ can import it.
+    """
+    statements = []
+    for row in path_rows or []:
+        if not isinstance(row, dict):
+            continue
+        start = row.get("start_name", "Unknown")
+        start_type = row.get("start_type", "")
+        end = row.get("end_name", "Unknown")
+        end_type = row.get("end_type", "")
+        rel = row.get("relationship", "related to")
+
+        end_props = row.get("end_properties", {}) or {}
+        sentence = f"{start_type} '{start}' {rel.replace('_', ' ').lower()} {end_type} '{end}'."
+
+        if "description" in end_props:
+            sentence += f" {end} is described as: {end_props['description']}."
+        if "value" in end_props:
+            sentence += f" It has a value of {end_props['value']}."
+        if "trend" in end_props:
+            sentence += f" The trend observed is {end_props['trend']}."
+        if "growth" in end_props:
+            sentence += f" Observed growth is {end_props['growth']}."
+
+        statements.append(sentence)
+    return statements
+
 class PromptSearcher:
     def __init__(self, qdrant_url: str, qdrant_key: str, collection_name: str = "prompt-guidance"):
         """Initialize the PromptSearcher with the correct collection name (hyphen, not underscore)"""
@@ -41,7 +72,7 @@ class PromptSearcher:
         reranked.sort(reverse=True, key=lambda x: x[0])
         return reranked
 
-    def search_prompt(self, query_text: str, sector: str = None, subsector: str = None, top_k: int = 5):
+    def search_prompt(self, query_text: str, sector: str = None, subsector: str = None, top_k: int = 1):
         """Search for relevant prompts with improved error handling"""
         try:
             query_vector = self.embedder.embed_query(query_text)
@@ -81,100 +112,120 @@ class PromptSearcher:
             return []  # Return empty list on error
 
 
+
 class KGReasoner:
     def __init__(self, graph):
         self.graph = graph
 
     def reason_over_company_relationships(self, company: str):
-        query = f"""
-        MATCH path = (c:Company {{id: "{company}"}})
-                    -[:SUPPORTS|SERVES|DRIVES|IMPACTS*1..2]-(e)
-        RETURN path, c.id as company, labels(e)[0] as entity_type,
-               e.id as related_entity, type(relationships(path)[-1]) as relationship_type
+        # Company → {Product|Concept|Sector|Country|Consumer} via common rels
+        q = """
+        MATCH path = (c:Company {id: $company})
+                     -[:SUPPORTS|SERVES|DRIVES|IMPACTS|OPERATES_IN|HAS_SECTOR|HAS_CONTEXT*1..2]-
+                     (e)
+        RETURN path,
+               c.id AS company,
+               labels(e)[0] AS entity_type,
+               e.id AS related_entity,
+               type(relationships(path)[-1]) AS relationship_type
         LIMIT 10
         """
-        return self.graph.query(query)
+        return self.graph.query(q, {"company": company})
 
     def reason_over_sector_trends(self, sector: str):
-        query = f"""
-        MATCH path = (s:Contextsector {{id: "{sector}"}})
-                    -[:SIGNALS|DRIVES|IMPACTS*1..2]-(sig:Signal)
-                    -[:PROVIDES_NEWS|MENTIONS*0..1]-(n:News)
-        RETURN path, s.id as sector, sig.id as signal,
-               
-               CASE WHEN n IS NOT NULL THEN n.id ELSE NULL END as news_id
-        LIMIT 5
+        # Sector → Concepts and optional News
+        q = """
+        MATCH (s:Sector {id: $sector})
+        OPTIONAL MATCH path = (s)
+            -[:DRIVES|IMPACTS|RELATED_TO|HAS_CONTEXT*1..2]- (c:Concept)
+        OPTIONAL MATCH (c)-[:PROVIDES_NEWS|MENTIONS]->(n:News)
+        RETURN path, s.id AS sector,
+               CASE WHEN c IS NULL THEN NULL ELSE c.id END AS concept,
+               CASE WHEN n IS NULL THEN NULL ELSE n.id END AS news_id
+        LIMIT 10
         """
-        return self.graph.query(query)
+        return self.graph.query(q, {"sector": sector})
 
     def reason_market_trends(self, signal: str):
-        query = f"""
-        MATCH path = (sig:Signal {{id: "{signal}"}})
-                    -[:IMPACTS|DRIVES*1..2]-(e)
-        RETURN path, sig.id as signal,
-               labels(e)[0] as impacted_type,
-               e.id as impacted_entity,
-               type(relationships(path)[-1]) as relationship
+        # Treat "signal" as a Concept
+        q = """
+        MATCH path = (sig:Concept {id: $signal})
+                     -[:IMPACTS|DRIVES|RELATED_TO*1..2]-(e)
+        RETURN path, sig.id AS signal,
+               labels(e)[0] AS impacted_type,
+               e.id AS impacted_entity,
+               type(relationships(path)[-1]) AS relationship
         LIMIT 8
         """
-        return self.graph.query(query)
+        return self.graph.query(q, {"signal": signal})
 
     def reason_over_product_impact(self, product: str):
-        query = f"""
-        MATCH path = (p:Product {{id: "{product}"}})
-                    -[:IMPACTS|DRIVES|SUPPORTS|SERVES*1..2]-(e)
-        RETURN path, p.id as product,
-               labels(e)[0] as impacted_type,
-               e.id as impacted_entity,
-               type(relationships(path)[-1]) as relationship_type
+        q = """
+        MATCH path = (p:Product {id: $product})
+                     -[:IMPACTS|DRIVES|SUPPORTS|SERVES|RELATED_TO*1..2]-(e)
+        RETURN path, p.id AS product,
+               labels(e)[0] AS impacted_type,
+               e.id AS impacted_entity,
+               type(relationships(path)[-1]) AS relationship_type
         LIMIT 8
         """
-        return self.graph.query(query)
+        return self.graph.query(q, {"product": product})
 
     def reason_over_business_model(self, sector: str, country: Optional[str] = None):
-        country_clause = f"""
-        MATCH (company:Company)-[:LOCATED_IN]->(country:Country {{id: "{country}"}})
-        """ if country else ""
-
-        query = f"""
-        MATCH (s:Contextsector {{id: "{sector}"}})
-        MATCH (company:Company)-[:HAS_CONTEXT|HAS_SECTOR]->(s)
-        {country_clause}
-        OPTIONAL MATCH (company)-[:SUPPORTS|SERVES]->(consumer:Consumer)
-        OPTIONAL MATCH (company)-[r:DRIVES|IMPACTS]->(trend:Trend)
-        RETURN company.id as company,
-               COLLECT(DISTINCT consumer.id) as consumers,
-               COLLECT(DISTINCT {{trend: trend.id, rel: type(r), desc: r.description}}) as trends
-        LIMIT 5
+        # Sector anchored: Companies in the sector, optionally filtered by country
+        q = """
+        MATCH (s:Sector {id: $sector})
+        MATCH (company:Company)-[:HAS_SECTOR|OPERATES_IN|HAS_CONTEXT]->(s)
+        OPTIONAL MATCH (company)-[:LOCATED_IN|BASED_IN]->(co:Country)
+        OPTIONAL MATCH (company)-[:SERVES]->(consumer:Consumer)
+        OPTIONAL MATCH (company)-[r:DRIVES|IMPACTS]->(concept:Concept)
+        WITH company,
+             COLLECT(DISTINCT consumer.id) AS consumers,
+             COLLECT(DISTINCT {concept: concept.id, rel: type(r), desc: r.description}) AS concepts,
+             co
+        WHERE $country IS NULL OR (co.id = $country)
+        RETURN company.id AS company,
+               consumers,
+               concepts
+        LIMIT 10
         """
-        return self.graph.query(query)
+        return self.graph.query(q, {"sector": sector, "country": country})
 
-    def reason_document_insights(self, tags: Dict[str, str]):
+    def reason_document_insights(self, tags: dict):
+        # Documents attach via :CONTAINS to Company/Sector/Country/Subsector/Concept etc.
         conditions = []
         params = {}
 
         if tags.get("company"):
             conditions.append("(d)-[:CONTAINS]->(:Company {id: $company})")
             params["company"] = tags["company"]
-
         if tags.get("sector"):
-            conditions.append("(d)-[:CONTAINS|HAS_CONTEXT]->(:Contextsector {id: $sector})")
+            conditions.append("(d)-[:CONTAINS]->(:Sector {id: $sector})")
             params["sector"] = tags["sector"]
-
         if tags.get("country"):
             conditions.append("(d)-[:CONTAINS]->(:Country {id: $country})")
             params["country"] = tags["country"]
+        if tags.get("subsector"):
+            conditions.append("(d)-[:CONTAINS]->(:Subsector {id: $subsector})")
+            params["subsector"] = tags["subsector"]
+        if tags.get("concept"):
+            conditions.append("(d)-[:CONTAINS]->(:Concept {id: $concept})")
+            params["concept"] = tags["concept"]
 
         if not conditions:
-            return self.graph.query("MATCH (d:Document) RETURN d.id as id, d.title as title, d.summary as summary, d.source_url as url LIMIT 5")
+            return self.graph.query("""
+                MATCH (d:Document)
+                RETURN d.id AS id, d.title AS title, d.summary AS summary, d.source_url AS url
+                LIMIT 5
+            """)
 
-        query = f"""
+        q = f"""
         MATCH (d:Document)
-        WHERE {" AND ".join(conditions)}
-        RETURN d.id as id, d.title as title, d.summary as summary, d.source_url as url
-        LIMIT 5
+        WHERE {' AND '.join(conditions)}
+        RETURN d.id AS id, d.title AS title, d.summary AS summary, d.source_url AS url
+        LIMIT 10
         """
-        return self.graph.query(query, params)
+        return self.graph.query(q, params)
 
     def reason(self, tags: dict):
         results = []
@@ -184,7 +235,6 @@ class KGReasoner:
 
         if tags.get("sector"):
             results += self.reason_over_sector_trends(tags["sector"])
-
             if tags.get("country"):
                 results += self.reason_over_business_model(tags["sector"], tags["country"])
 
@@ -197,12 +247,11 @@ class KGReasoner:
         results += self.reason_document_insights(tags)
         return results
 
-
 class RetrievalAgent:
     def __init__(self, mongo_uri: str, qdrant_url: str, qdrant_key: str,
                  neo4j_uri: str, neo4j_user: str, neo4j_pass: str,
                  qdrant_collection: str = "tester2",
-                 pdf_collection: str = "veerive_docs",  # Add PDF collection
+                 pdf_collection: str = "veerive_docs",  
                  embed_model: str = "text-embedding-3-large"):
 
         # MongoDB
@@ -222,7 +271,7 @@ class RetrievalAgent:
         # Qdrant
         self.qdrant_client = QdrantClient(url=qdrant_url, api_key=qdrant_key)
         self.qdrant_collection = qdrant_collection
-        self.pdf_collection = pdf_collection  # Store PDF collection name
+        self.pdf_collection = pdf_collection 
 
         self.embedder = OpenAIEmbeddings(model=embed_model, api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -233,8 +282,8 @@ class RetrievalAgent:
         self.kg_reasoner = KGReasoner(self.neo4j_graph)
 
 
-    def retrieve_from_qdrant(self, query_text: str, top_k: int = 5):
-        """Retrieve from regular posts collection with enhanced scoring"""
+    def retrieve_from_qdrant(self, query_text: str, top_k: int = 8):
+        """Search regular (non‑PDF) content in posts collection."""
         try:
             query_vector = self.embedder.embed_query(query_text)
             hits = self.qdrant_client.search(
@@ -246,13 +295,12 @@ class RetrievalAgent:
                 timeout=10,
                 score_threshold=0.55,
             )
-            
-            logger.info(f"Found {len(hits)} regular document results")
+            logger.info(f"[Qdrant posts] Retrieved {len(hits)} hits")
             return hits
         except Exception as e:
-            logger.error(f"Error retrieving from regular collection: {str(e)}")
+            logger.error(f"[Qdrant posts] Error: {e}")
             return []
-    
+
     def retrieve_prompt(self, query_text: str, top_k: int = 1):
         """Retrieve prompt guidance from Qdrant based on the query text with better error handling"""
         try:
@@ -287,7 +335,7 @@ class RetrievalAgent:
                 # Company to products
                 """
                 MATCH path = (c:Company {id: $company})
-                            -[:SUPPORTS|SERVES|DRIVES|CONTAINS]->
+                            -[:SUPPORTS|SERVES|DRIVES]->
                             (p:Product)
                 RETURN path, c.id as company, p.id as product,
                     type(relationships(path)[0]) as relationship
@@ -297,7 +345,7 @@ class RetrievalAgent:
                 """
                 MATCH path = (c:Company {id: $company})
                             -[:HAS_CONTEXT|HAS_SECTOR]->
-                            (s:Contextsector)
+                            (s:Sector)
                 RETURN path, c.id as company, s.id as sector,
                     type(relationships(path)[0]) as relationship
                 LIMIT 3
@@ -306,7 +354,7 @@ class RetrievalAgent:
                 """
                 MATCH path = (c:Company {id: $company})
                             -[:DRIVES|SIGNALS|IMPACTS]->
-                            (t:Trend)
+                            (t:Concept)
                 RETURN path, c.id as company, t.id as trend,
                     type(relationships(path)[0]) as relationship
                 LIMIT 3
@@ -324,7 +372,7 @@ class RetrievalAgent:
             sector_queries = [
                 # Sector to companies
                 """
-                MATCH path = (s:Contextsector {id: $sector})
+                MATCH path = (s:Sector {id: $sector})
                             <-[:HAS_CONTEXT|HAS_SECTOR|OPERATES_IN]-
                             (c:Company)
                 RETURN path, s.id as sector, c.id as company,
@@ -333,18 +381,18 @@ class RetrievalAgent:
                 """,
                 # Sector to signals
                 """
-                MATCH path = (s:Contextsector {id: $sector})
-                            -[:SIGNALS|DRIVES|IMPACTS]->
-                            (sig:Signal)
+                MATCH path = (s:Sector {id: $sector})
+                            -[:RELATED_TO|DRIVES|IMPACTS]->
+                            (sig:Concept)
                 RETURN path, s.id as sector, sig.id as signal,
                     type(relationships(path)[0]) as relationship
                 LIMIT 3
                 """,
                 # Sector to trends
                 """
-                MATCH path = (s:Contextsector {id: $sector})
+                MATCH path = (s:Sector {id: $sector})
                             -[:DRIVES|IMPACTS]->
-                            (t:Trend)
+                            (t:Concept)
                 RETURN path, s.id as sector, t.id as trend,
                     type(relationships(path)[0]) as relationship
                 LIMIT 3
@@ -377,7 +425,7 @@ class RetrievalAgent:
         params = {}
 
         if tags.get("sector"):
-            doc_conditions.append("(d)-[:CONTAINS]->(:Contextsector {id: $sector})")
+            doc_conditions.append("(d)-[:CONTAINS]->(:Sector {id: $sector})")
             params["sector"] = tags["sector"]
         if tags.get("company"):
             doc_conditions.append("(d)-[:CONTAINS]->(:Company {id: $company})")
@@ -412,7 +460,7 @@ class RetrievalAgent:
         CALL apoc.path.subgraphAll(c, {{
             maxLevel: {depth},
             relationshipFilter: '>, <',
-            labelFilter: '+Company|+Country|+Signal|+Trend|+Product|+Contextsector|+Subsector|+Document'
+            labelFilter: '+Company|+Country|+Concept|+Product|+Sector|+Subsector|+Document|+Consumer|+Location'
         }})
         YIELD nodes, relationships
 
@@ -445,99 +493,82 @@ class RetrievalAgent:
         """
         return self.neo4j_graph.query(cypher, {"chunk_ids": chunk_ids})
 
-        
-    def convert_paths_to_natural_language(path_rows):
-        """
-        Convert raw Cypher query results into readable natural language sentences.
-        """
-        statements = []
-
-        for row in path_rows:
-            start = row.get("start_name", "Unknown")
-            start_type = row.get("start_type", "")
-            end = row.get("end_name", "Unknown")
-            end_type = row.get("end_type", "")
-            rel = row.get("relationship", "related to")
-
-            # Get optional properties
-            start_props = row.get("start_properties", {})
-            end_props = row.get("end_properties", {})
-
-            # Begin with relationship summary
-            sentence = f"{start_type} '{start}' {rel.replace('_', ' ').lower()} {end_type} '{end}'."
-
-            # Enrich with extra info
-            if "description" in end_props:
-                sentence += f" {end} is described as: {end_props['description']}."
-            if "value" in end_props:
-                sentence += f" It has a value of {end_props['value']}."
-            if "trend" in end_props:
-                sentence += f" The trend observed is {end_props['trend']}."
-            if "growth" in end_props:
-                sentence += f" Observed growth is {end_props['growth']}."
-
-            statements.append(sentence)
-
-        return statements
-
-
-
     def retrieve(self, refined_query: dict):
-        """Retrieve relevant information using all available data sources with separate handling for PDFs"""
+        """Retrieve from separate collections: regular posts + PDF (text/table) chunks."""
         query_text = refined_query.get("refined_query", refined_query.get("original_query", ""))
         tags = refined_query.get("tags", {})
-        print(f"Tags: {tags}")
-        query_type = tags.get("query_type", "")
-        
-        # Store the current tags for use in retrieve_prompt
         self.current_tags = tags
-        
-        # Retrieve from regular posts and PDF documents separately
-        regular_results = self.retrieve_from_qdrant(query_text, top_k=8)
-        pdf_results = self.retrieve_from_pdf_docs(query_text, top_k=5)
-        
-        # Process regular chunks for graph reasoning
+        logger.info(f"[Retrieval] Query='{query_text}' Tags={tags}")
+
+        # --- 1. Regular posts (tester2) ---
+        post_hits = self.retrieve_from_qdrant(query_text, top_k=16)
+
         regular_chunks = []
         regular_docs_formatted = []
-        
-        for result in regular_results:
-            chunk_id = "chunk_" + str(result.payload['postId'])
+        for hit in post_hits:
+            payload = hit.payload or {}
+            if 'postId' not in payload:
+                continue  # ensure only true posts
+            chunk_id = "chunk_" + str(payload['postId'])
             regular_chunks.append(chunk_id)
             regular_docs_formatted.append({
-                'id': result.payload['postId'],
-                'text': result.payload.get('text', result.payload.get('content', '')),
-                'score': result.score,
+                'id': payload['postId'],
+                'text': payload.get('text', payload.get('content', '')),
+                'score': hit.score,
                 'source': 'regular_post',
-                'metadata': result.payload
+                'metadata': payload
             })
-        
-        # Process PDF chunks with enhanced formatting and categorization
-        pdf_docs_processed = self.process_pdf_results(pdf_results)
-        
-        # Get graph insights using the reasoner (only for regular posts that have graph connections)
-        reasoner_results = self.kg_reasoner.reason(tags)
-        
-        # Get direct graph paths (only for regular chunks that have graph relationships)
-        neo4j_paths = []
+
+        logger.info(f"[Retrieval] Regular posts processed: {len(regular_docs_formatted)}")
+
+        # --- 2. PDF collection (veerive_docs) ---
+        pdf_hits_raw = self.retrieve_from_pdf_docs(query_text, top_k=12)  # already filters & boosts
+        pdf_docs_processed = self.process_pdf_results(pdf_hits_raw)
+        logger.info(f"[Retrieval] PDF processed: {len(pdf_docs_processed)}")
+
+        # --- 3. Graph reasoning (only meaningful if we have tags) ---
+        reasoner_results = self.kg_reasoner.reason(tags) if tags else []
+        logger.info(f"[Retrieval] KG insights: {len(reasoner_results)}")
+
+        # --- 4. Direct knowledge graph paths from chunks (optional) ---
         pathscontext = []
         if regular_chunks:
-            neo4j_paths = self.trace_knowledge_paths(regular_chunks, 1)
-            pathscontext = convert_paths_to_natural_language(neo4j_paths)
+            try:
+                neo4j_paths = self.trace_knowledge_paths(regular_chunks, depth=1)
+                pathscontext = convert_paths_to_natural_language(neo4j_paths)
+            except Exception as e:
+                logger.error(f"[KG paths] Error: {e}")
 
-        # Retrieve prompt guidance with error handling
-        prompt_results = self.retrieve_prompt(query_text, 1)
-        
-        return {
+        # --- 5. Prompt guidance ---
+        prompt_results = self.retrieve_prompt(query_text, top_k=1)
+
+        # --- 6. Assemble result ---
+        result = {
             "refined_query": refined_query,
-            "qdrant_docs": regular_docs_formatted,  # Only regular posts for normal processing
-            "pdf_docs": pdf_docs_processed,  # Specially processed PDF documents
-            "pdf_content": self.format_pdf_content(pdf_docs_processed),  # Formatted PDF content
+            "qdrant_docs": regular_docs_formatted,
+            "pdf_docs": pdf_docs_processed,
+            "pdf_content": self.format_pdf_content(pdf_docs_processed),
             "kg_insights": reasoner_results,
             "kg_paths": pathscontext,
             "prompt": prompt_results,
         }
+
+        # DEBUG DUMP (trim large fields)
+        try:
+            logger.info(
+                "[Retrieval Summary] posts=%d pdf=%d kg_insights=%d kg_paths=%d prompt=%d",
+                len(result["qdrant_docs"]),
+                len(result["pdf_docs"]),
+                len(result["kg_insights"]),
+                len(result["kg_paths"]),
+                len(result["prompt"]),
+            )
+        except Exception:
+            pass
+
+        return result
     
-    def retrieve_from_pdf_docs(self, query_text: str, top_k: int = 5):
+    def retrieve_from_pdf_docs(self, query_text: str, top_k: int = 8):
         """Retrieve relevant PDF document chunks with enhanced filtering and scoring"""
         try:
             query_vector = self.embedder.embed_query(query_text)
@@ -639,7 +670,7 @@ class RetrievalAgent:
         sorted_docs = sorted(docs_by_title.values(), key=lambda x: x['max_score'], reverse=True)
         
         # Format each document section
-        for i, doc_info in enumerate(sorted_docs[:3]):  # Top 3 most relevant documents
+        for i, doc_info in enumerate(sorted_docs[0:]):  # Top 3 most relevant documents
             formatted_content += f"PDF Document {i+1}: {doc_info['title']}\n"
             formatted_content += f"Source: {doc_info['url']}\n"
             formatted_content += f"Relevance Score: {doc_info['max_score']:.3f}\n\n"
@@ -647,14 +678,14 @@ class RetrievalAgent:
             # Add table data first (often most structured)
             if doc_info['tables']:
                 formatted_content += "📊 TABLE DATA:\n"
-                for table in doc_info['tables'][:2]:  # Max 2 tables per document
+                for table in doc_info['tables'][0:]:  # Max 2 tables per document
                     formatted_content += f"{table['formatted_content']}\n"
                 formatted_content += "\n"
             
             # Add text content
             if doc_info['text_chunks']:
                 formatted_content += "📄 TEXT CONTENT:\n"
-                for chunk in doc_info['text_chunks'][:2]:  # Max 2 text chunks per document
+                for chunk in doc_info['text_chunks'][0:]:  # Max 2 text chunks per document
                     formatted_content += f"{chunk['formatted_content'][:800]}...\n\n"
             
             formatted_content += "=" * 50 + "\n\n"
@@ -664,7 +695,7 @@ class RetrievalAgent:
             high_score_docs = [doc for doc in pdf_chunks if doc['score'] > 0.75]
             if high_score_docs:
                 formatted_content += "🔍 HIGH CONFIDENCE PDF INSIGHTS:\n"
-                for doc in high_score_docs[:3]:
+                for doc in high_score_docs[0:]:
                     formatted_content += f"• {doc['title']}: {doc['formatted_content'][:200]}...\n"
                 formatted_content += "\n"
         
@@ -673,7 +704,9 @@ class RetrievalAgent:
     def process_pdf_results(self, pdf_results: list) -> list:
         """Process PDF results with enhanced categorization and formatting"""
         processed_pdfs = []
-        
+        print(f"Processing {len(pdf_results)} PDF results with enhanced formatting")
+        print(pdf_results)
+
         for result in pdf_results:
             payload = result.payload
             
@@ -780,85 +813,3 @@ class RetrievalAgent:
             relevance_score += 0.2
         
         return min(relevance_score, 1.0)  # Cap at 1.0
-def convert_paths_to_natural_language(path_rows):
-    """
-    Convert raw Cypher query results into readable natural language sentences.
-    """
-    statements = []
-
-    for row in path_rows:
-        start = row.get("start_name", "Unknown")
-        start_type = row.get("start_type", "")
-        end = row.get("end_name", "Unknown")
-        end_type = row.get("end_type", "")
-        rel = row.get("relationship", "related to")
-
-        # Get optional properties
-        start_props = row.get("start_properties", {})
-        end_props = row.get("end_properties", {})
-
-        # Begin with relationship summary
-        sentence = f"{start_type} '{start}' {rel.replace('_', ' ').lower()} {end_type} '{end}'."
-
-        # Enrich with extra info
-        if "description" in end_props:
-            sentence += f" {end} is described as: {end_props['description']}."
-        if "value" in end_props:
-            sentence += f" It has a value of {end_props['value']}."
-        if "trend" in end_props:
-            sentence += f" The trend observed is {end_props['trend']}."
-        if "growth" in end_props:
-            sentence += f" Observed growth is {end_props['growth']}."
-
-        statements.append(sentence)
-
-    return statements
-
-
-if __name__ == "__main__":
-    # Example usage
-    username = "chaubeyp"
-    password = urllib.parse.quote_plus("ConsTrack360")
-    mongouri = f"mongodb+srv://{username}:{password}@veerive.tta8g.mongodb.net/"
-    mongo_uri = mongouri
-    qdrant_url = os.getenv("QDRANT_URL")
-    qdrant_key = os.getenv("QDRANT_API")
-    neo4j_uri = os.getenv("NEO4J_URI")
-    neo4j_user = os.getenv("NEO4J_USERNAME")
-    neo4j_pass = os.getenv("NEO4J_PASSWORD")
-
-    retrieval_agent = RetrievalAgent(mongo_uri, qdrant_url, qdrant_key, neo4j_uri, neo4j_user, neo4j_pass)
-    
-    # Example refined query
-    refined_query = {
-      "original_query": "What are the dominant business models in B2C BNPL in India?",
-      "refined_query": "What are the dominant business models for Buy Now, Pay Later (BNPL) companies serving B2C customers in India?", 
-      "tags": {
-        "sector": "BNPL",
-        "country": "India",
-        "company": "",
-        "subsector": "B2C",
-        "query_type": "Business Models"
-      }
-    }
-
-    results = retrieval_agent.retrieve(refined_query)
-    print(f"Found {len(results['qdrant_docs'])} regular document results")
-    print(f"Found {len(results['pdf_docs'])} PDF document results")
-    print(f"Found {len(results['kg_insights'])} knowledge graph insights")
-    print(f"Found {len(results['kg_paths'])} direct graph paths")
-    
-    # Show regular documents
-    print("\n=== REGULAR DOCUMENTS ===")
-    for doc in results['qdrant_docs']:
-        print(f"ID: {doc['id']}, Score: {doc['score']:.3f}, Source: {doc['source']}")
-    
-    # Show PDF documents with enhanced info
-    print("\n=== PDF DOCUMENTS ===")
-    for doc in results['pdf_docs']:
-        print(f"Title: {doc['title']}, Score: {doc['score']:.3f}, Type: {doc['content_type']}, Relevance: {doc['relevance_score']:.3f}")
-    
-    # Show formatted PDF content
-    if results['pdf_content']:
-        print("\n=== FORMATTED PDF CONTENT (first 500 chars) ===")
-        print(results['pdf_content'][:500] + "...")
