@@ -45,3 +45,4 @@ env/
 *.swp
 *.swo
 keys.txt
+.venv/
