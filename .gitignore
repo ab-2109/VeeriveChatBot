@@ -31,6 +31,10 @@ wheels/
 .installed.cfg
 *.egg
 cp.py
+# Virtual environments
+.venv/
+venv/
+env/
 
 # Docker
 .dockerignore
