@@ -127,7 +127,6 @@ def refine_node(state: GraphState) -> GraphState:
     """Refine the query based on intake and clarifications"""
     try:
         metadata = state.get("metadata", {})
-        
         logger.info("Starting query refinement")
         
         # If we've already got clarifications, use them with the original query
@@ -160,6 +159,15 @@ def refine_node(state: GraphState) -> GraphState:
         return {
             "refined_query": refined,
             "status": "refine_complete"
+        }
+    except FileNotFoundError as fe:
+        logger.error(
+            "Refine file missing: %s (cwd=%s)", getattr(fe, "filename", "<unknown>"), os.getcwd(),
+            exc_info=True
+        )
+        return {
+            "errors": [f"Refine missing file: {getattr(fe, 'filename', '<unknown>')} (cwd={os.getcwd()})"],
+            "status": "error"
         }
     except Exception as e:
         logger.exception("Refine failed")
