@@ -162,9 +162,9 @@ def refine_node(state: GraphState) -> GraphState:
             "status": "refine_complete"
         }
     except Exception as e:
-        logger.error(f"Refine error: {str(e)}")
+        logger.exception("Refine failed")
         return {
-            "errors": [f"Refine error: {str(e)}"],
+            "errors": [f"Refine error: {type(e).__name__}: {str(e)}"],
             "status": "error"
         }
 
