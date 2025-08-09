@@ -11,6 +11,7 @@ from agents.clarification import clarification_node, process_clarification_answe
 import operator
 import logging
 import urllib.parse
+from pathlib import Path
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -29,6 +30,8 @@ class GraphState(TypedDict):
     clarification_answers: Optional[List[Dict[str, str]]]  # No annotation
     status: Optional[str]
     errors: Optional[List[str]]  # No annotation
+
+USE_REFINE = os.getenv("USE_REFINE", "1") == "1"
 
 def init_retrieval_agent():
     """Initialize RetrievalAgent with enhanced PDF support and better error handling"""
@@ -124,57 +127,64 @@ def clarification_node_wrapper(state: GraphState) -> GraphState:
         return {**state, "errors": state.get("errors", []) + [f"Clarification error: {str(e)}"]}
 
 def refine_node(state: GraphState) -> GraphState:
-    """Refine the query based on intake and clarifications"""
+    """Refine the query based on intake and clarifications, with robust file handling."""
     try:
-        metadata = state.get("metadata", {})
+        metadata = state.get("metadata", {}) or {}
         logger.info("Starting query refinement")
-        
-        # If we've already got clarifications, use them with the original query
-        if "clarifications" in metadata and metadata["clarifications"]:
-            # Either use intake_state or build minimal state with original query
-            if state.get("intake_state"):
-                intake_state = state.get("intake_state", {})
-                intake_state["metadata"] = metadata
-            else:
-                # Create a minimal intake state using the original query
-                original_query = metadata.get("original_query", state["query"])
-                intake_state = {
-                    "query": original_query,
-                    "metadata": metadata
-                }
-        else:
-            # Normal flow from intake
-            intake_state = state.get("intake_state", {})
-        
-        refined = get_refiner().refine(intake_state)
-        
-        if "error" in refined:
-            logger.error(f"Refinement error: {refined['error']}")
+
+        # Build intake_state reliably
+        intake_state = state.get("intake_state") or {}
+        if not intake_state:
+            original_query = metadata.get("original_query", state.get("query"))
+            intake_state = {"query": original_query, "metadata": metadata}
+
+        # Allow bypassing refine via env
+        if not USE_REFINE:
+            logger.warning("Skipping refine step (USE_REFINE=0)")
+            return {"refined_query": intake_state.get("query"), "status": "refine_complete"}
+
+        # Capture FileNotFound in get_refiner()
+        try:
+            refiner = get_refiner()
+        except FileNotFoundError as fe:
+            logger.exception(
+                "get_refiner() missing file: %s (cwd=%s)",
+                getattr(fe, "filename", "<unknown>"),
+                os.getcwd(),
+            )
             return {
-                "errors": [refined["error"]],
-                "status": "error"
+                "errors": [
+                    f"Refine missing file in get_refiner: {getattr(fe, 'filename','<unknown>')} (cwd={os.getcwd()})"
+                ],
+                "status": "error",
             }
-        
+
+        # Capture FileNotFound in refine()
+        try:
+            refined = refiner.refine(intake_state)
+        except FileNotFoundError as fe:
+            logger.exception(
+                "refiner.refine() missing file: %s (cwd=%s)",
+                getattr(fe, "filename", "<unknown>"),
+                os.getcwd(),
+            )
+            return {
+                "errors": [
+                    f"Refine missing file in refine(): {getattr(fe, 'filename','<unknown>')} (cwd={os.getcwd()})"
+                ],
+                "status": "error",
+            }
+
+        if isinstance(refined, dict) and "error" in refined:
+            logger.error("Refinement error: %s", refined["error"])
+            return {"errors": [refined["error"]], "status": "error"}
+
         logger.info("Query refinement completed successfully")
-        return {
-            "refined_query": refined,
-            "status": "refine_complete"
-        }
-    except FileNotFoundError as fe:
-        logger.error(
-            "Refine file missing: %s (cwd=%s)", getattr(fe, "filename", "<unknown>"), os.getcwd(),
-            exc_info=True
-        )
-        return {
-            "errors": [f"Refine missing file: {getattr(fe, 'filename', '<unknown>')} (cwd={os.getcwd()})"],
-            "status": "error"
-        }
+        return {"refined_query": refined, "status": "refine_complete"}
+
     except Exception as e:
         logger.exception("Refine failed")
-        return {
-            "errors": [f"Refine errorososososososos: {type(e).__name__}: {str(e)}"],
-            "status": "error"
-        }
+        return {"errors": [f"Refine error: {type(e).__name__}: {e}"], "status": "error"}
 
 def retrieve_node(state: GraphState) -> GraphState:
     """Retrieve relevant information using enhanced RetrievalAgent with PDF support"""

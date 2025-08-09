@@ -3,9 +3,9 @@ from typing import Dict, Optional, Union, Any
 from langchain_openai import ChatOpenAI
 import json
 import os
-from dotenv import load_dotenv
 import urllib.parse
 import logging
+from pathlib import Path
 from agents.intake import process_intake, IntakeState
 
 # Setup logging
@@ -13,7 +13,19 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger('query_refiner')
 
 # Load environment variables
+from dotenv import load_dotenv
 load_dotenv()
+
+# Resolve prompt template path with safe fallback
+HERE = Path(__file__).resolve().parent
+PROJECT_ROOT = HERE.parent
+PROMPTS_DIR = PROJECT_ROOT / "prompts"
+REFINE_FILE = PROMPTS_DIR / "refine.txt"
+try:
+    REFINE_TEMPLATE = REFINE_FILE.read_text(encoding="utf-8")
+except FileNotFoundError:
+    # Fallback so deployment doesn't crash if the file is missing
+    REFINE_TEMPLATE = "Refine the answer for clarity, correctness, and structure."
 
 class QueryRefinerAgent:
     def __init__(self, llm: ChatOpenAI, mongo_uri: Optional[str] = None):
@@ -61,23 +73,11 @@ class QueryRefinerAgent:
     def refine(self, input_data: Union[str, Dict, IntakeState]) -> Dict:
         """
         Refine a query to extract structured tags.
-        
-        Args:
-            input_data: Can be:
-                - A string query
-                - An IntakeState object from intake.py
-                - A dictionary with at least a 'query' key
-                
-        Returns:
-            Dictionary with original_query, refined_query, and tags
         """
-        # Extract query and metadata from different input types
         metadata = {}
-        
         if isinstance(input_data, str):
             query = input_data
         elif isinstance(input_data, dict):
-            # Check if this is an IntakeState object
             if 'query' in input_data:
                 query = input_data['query']
                 metadata = input_data.get('metadata', {})
@@ -85,84 +85,65 @@ class QueryRefinerAgent:
                 query = str(input_data)
         else:
             query = str(input_data)
-            
-        # Include any clarifications in the prompt if they exist
+
         clarification_context = ""
         if isinstance(metadata, dict) and 'clarifications' in metadata:
             clarifications = metadata['clarifications']
-            clarification_text = "\n".join([
-                f"Q: {item['question']}\nA: {item['answer']}"
-                for item in clarifications
-            ])
+            clarification_text = "\n".join(
+                [f"Q: {item['question']}\nA: {item['answer']}" for item in clarifications]
+            )
             clarification_context = f"\nAdditional context from clarifications:\n{clarification_text}"
-            
-        # Create the prompt with enriched context
-        prompt = f"""
-You are an intelligent query refiner. Extract the following structured tags from the user query:
-- Sector (the industry or business domain)
-- Country (specific geography if mentioned)
-- Company (specific organization if mentioned)
-- Query Type (business model, trend, impact analysis, swot, etc.)
-- Subsector (like B2B, B2C, retail, wholesale, etc.)
+
+        # Build prompt using external template + structured JSON spec
+        prompt = f"""{REFINE_TEMPLATE}
 
 User query: "{query}"{clarification_context}
 
 Only reply in JSON:
 {{
   "original_query": "{query}",
-  "refined_query": "...",  
+  "refined_query": "...",
   "tags": {{
     "sector": "...",
-    "country": "...", 
+    "country": "...",
     "company": "...",
     "subsector": "...",
     "query_type": "..."
   }}
-}}
+}}"""
 
-Make sure the refined_query clarifies and expands the original query based on any clarifications provided.
-Leave tag values empty (as "") if they are not present in the query.
-"""
         try:
             response = self.llm.invoke(prompt)
             response_text = response.content if hasattr(response, 'content') else str(response)
-            
-            # Clean up response if needed (handling markdown code blocks)
             if response_text.startswith('```'):
                 parts = response_text.split('```')
                 if len(parts) >= 3:
                     response_text = parts[1].strip()
                     if response_text.startswith('json'):
                         response_text = response_text[4:].strip()
-            
-            # Parse JSON response
+
             parsed = json.loads(response_text)
-            
-            # Verify tags against MongoDB
+
             tags = parsed.get("tags", {})
             for key in ["sector", "country", "company"]:
                 if tags.get(key):
                     tags[key] = self._verify_tag(tags[key], key)
-                    
             parsed["tags"] = tags
-            
-            # Include original intake metadata for traceability
+
             if metadata:
                 parsed["metadata"] = metadata
-                
-            # Include request_id if available
             if isinstance(input_data, dict) and 'request_id' in input_data:
                 parsed["request_id"] = input_data["request_id"]
-                
+
             return parsed
-            
+
         except Exception as e:
             logger.error(f"Error refining query: {str(e)}")
             return {
-                "error": "LLM parsing failed", 
+                "error": "LLM parsing failed",
                 "original_query": query,
                 "raw_response": response_text if 'response_text' in locals() else None,
-                "exception": str(e)
+                "exception": str(e),
             }
 
 
@@ -171,12 +152,13 @@ def get_refiner():
     llm = ChatOpenAI(
         model="gpt-4o",
         temperature=0.0,
-        api_key=os.getenv("OPENAI_API_KEY")
+        api_key=os.getenv("OPENAI_API_KEY"),
     )
-    username = "chaubeyp"
-    password = urllib.parse.quote_plus("ConsTrack360")
-    mongouri = f"mongodb+srv://{username}:{password}@veerive.tta8g.mongodb.net/"
-    return QueryRefinerAgent(llm, mongo_uri=mongouri)
+    # Use env vars (no hardcoded secrets)
+    username = os.getenv("MONGO_USERNAME")
+    password = urllib.parse.quote_plus(os.getenv("MONGO_PASSWORD"))
+    mongo_uri = f"mongodb+srv://{username}:{password}@veerive.tta8g.mongodb.net/"
+    return QueryRefinerAgent(llm, mongo_uri=mongo_uri)
 
 
 if __name__ == "__main__":
