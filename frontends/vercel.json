@@ -1,6 +1,6 @@
 {
   "rewrites": [
-    { "source": "/api",        "destination": "http://54.205.162.22.nip.io/" },
-    { "source": "/api/:path*", "destination": "http://54.205.162.22.nip.io/:path*" }
+    { "source": "/api",        "destination": "http://54.210.154.126.nip.io/" },
+    { "source": "/api/:path*", "destination": "http://54.210.154.126.nip.io/:path*" }
   ]
 }
