@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os, re, time, hashlib, logging, traceback, urllib.parse
 from typing import Dict, Any, List, Set, Optional
-import schedule
+# import schedule
 from bson import ObjectId
 from pymongo import MongoClient
 from qdrant_client import QdrantClient
@@ -359,18 +359,18 @@ def run_once_with_retries() -> bool:
     logger.error("Maintenance failed after maximum retries.")
     return False
 
-def run_scheduler():
-    """Run recurring maintenance using 'schedule' with the configured interval."""
-    logger.info(f"Starting scheduler: every {SYNC_INTERVAL_MINUTES} minutes")
-    schedule.every(SYNC_INTERVAL_MINUTES).minutes.do(run_once_with_retries)
-    # Kick off the first run immediately
-    run_once_with_retries()
-    try:
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Scheduler stopped by user.")
+# def run_scheduler():
+#     """Run recurring maintenance using 'schedule' with the configured interval."""
+#     logger.info(f"Starting scheduler: every {SYNC_INTERVAL_MINUTES} minutes")
+#     schedule.every(SYNC_INTERVAL_MINUTES).minutes.do(run_once_with_retries)
+#     # Kick off the first run immediately
+#     run_once_with_retries()
+#     try:
+#         while True:
+#             schedule.run_pending()
+#             time.sleep(1)
+#     except KeyboardInterrupt:
+#         logger.info("Scheduler stopped by user.")
 
 if __name__ == "__main__":
     run_once_with_retries()
