@@ -466,8 +466,37 @@ class RetrievalAgent:
     def trace_knowledge_paths(self, chunk_ids: list[str], depth: int = 2):
         """
         Traverse from Chunks and return enriched paths with full node details and relationship types,
-        excluding the 'embedding' property from Chunk and Document nodes.
+        also extracting the text content from chunks for RAG context.
         """
+        # First get the chunk texts directly
+        chunk_text_query = """
+        MATCH (c:Chunk)
+        WHERE c.id IN $chunk_ids
+        RETURN c.id AS chunk_id, c.text AS chunk_text
+        """
+        chunk_texts = self.neo4j_graph.query(chunk_text_query, {"chunk_ids": chunk_ids})
+        
+        # Log the chunk texts retrieved from Neo4j
+        logger.info("=== NEO4J CHUNK TEXTS RETRIEVED ===")
+        chunk_content = []
+        for i, row in enumerate(chunk_texts):
+            chunk_id = row.get("chunk_id", "unknown")
+            text = row.get("chunk_text", "")
+            # Clean HTML tags if present
+            text = text.replace("<p>", "").replace("</p>", "\n").strip()
+            if text:
+                chunk_content.append({
+                    "id": chunk_id,
+                    "text": text,
+                    "source": "neo4j_chunk"
+                })
+                logger.info(f"Neo4j Chunk {i+1}:")
+                logger.info(f"  Chunk ID: {chunk_id}")
+                logger.info(f"  Text preview: {text[:200]}...")
+                logger.info("  " + "-" * 50)
+        logger.info("=== END NEO4J CHUNK TEXTS ===")
+        
+        # Then get the knowledge graph paths
         cypher = f"""
         MATCH (c:Chunk)
         WHERE c.id IN $chunk_ids
@@ -505,10 +534,23 @@ class RetrievalAgent:
                 ELSE properties(end)
             END AS end_properties
         """
-        return self.neo4j_graph.query(cypher, {"chunk_ids": chunk_ids})
+        
+        path_results = self.neo4j_graph.query(cypher, {"chunk_ids": chunk_ids})
+        
+        # Log the knowledge graph paths
+        logger.info("=== NEO4J KNOWLEDGE GRAPH PATHS ===")
+        for i, row in enumerate(path_results):
+            logger.info(f"Path {i+1}:")
+            logger.info(f"  {row.get('start_type', 'Unknown')} '{row.get('start_name', 'Unknown')}' " +
+                       f"{row.get('relationship', 'related to').replace('_', ' ')} " +
+                       f"{row.get('end_type', 'Unknown')} '{row.get('end_name', 'Unknown')}'")
+            logger.info("  " + "-" * 50)
+        logger.info("=== END NEO4J KNOWLEDGE GRAPH PATHS ===")
+        
+        return path_results, chunk_content
 
     def retrieve(self, refined_query: dict):
-        """Retrieve from separate collections: regular posts + PDF (text/table) chunks."""
+        """Retrieve from separate collections: regular posts + PDF (text/table) chunks + Neo4j chunks."""
         query_text = refined_query.get("refined_query", refined_query.get("original_query", ""))
         tags = refined_query.get("tags", {})
         self.current_tags = tags
@@ -544,12 +586,14 @@ class RetrievalAgent:
         reasoner_results = self.kg_reasoner.reason(tags) if tags else []
         logger.info(f"[Retrieval] KG insights: {len(reasoner_results)}")
 
-        # --- 4. Direct knowledge graph paths from chunks (optional) ---
+        # --- 4. Direct knowledge graph paths from chunks + chunk text content ---
         pathscontext = []
+        neo4j_chunks = []
         if regular_chunks:
             try:
-                neo4j_paths = self.trace_knowledge_paths(regular_chunks, depth=1)
+                neo4j_paths, neo4j_chunks = self.trace_knowledge_paths(regular_chunks, depth=1)
                 pathscontext = convert_paths_to_natural_language(neo4j_paths)
+                logger.info(f"[Retrieval] Neo4j chunks with text: {len(neo4j_chunks)}")
             except Exception as e:
                 logger.error(f"[KG paths] Error: {e}")
 
@@ -557,21 +601,26 @@ class RetrievalAgent:
         prompt_results = self.retrieve_prompt(query_text, top_k=1)
 
         # --- 6. Assemble result ---
+        # Add Neo4j chunk content to the RAG context
+        combined_docs = regular_docs_formatted + neo4j_chunks
+        
         result = {
             "refined_query": refined_query,
-            "qdrant_docs": regular_docs_formatted,
+            "qdrant_docs": combined_docs,  # Include both regular Qdrant and Neo4j chunks
             "pdf_docs": pdf_docs_processed,
             "pdf_content": self.format_pdf_content(pdf_docs_processed),
             "kg_insights": reasoner_results,
             "kg_paths": pathscontext,
             "prompt": prompt_results,
+            "neo4j_chunks": neo4j_chunks,  # Include separately for completeness
         }
 
         # DEBUG DUMP (trim large fields)
         try:
             logger.info(
-                "[Retrieval Summary] posts=%d pdf=%d kg_insights=%d kg_paths=%d prompt=%d",
-                len(result["qdrant_docs"]),
+                "[Retrieval Summary] posts=%d neo4j=%d pdf=%d kg_insights=%d kg_paths=%d prompt=%d",
+                len(regular_docs_formatted),
+                len(neo4j_chunks),
                 len(result["pdf_docs"]),
                 len(result["kg_insights"]),
                 len(result["kg_paths"]),

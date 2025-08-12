@@ -74,7 +74,7 @@ def get_user_convo_history(session_id: str) -> ChatMessageHistory:
 # === Helper Functions ===
 
 def dedupe_chunks(chunks: List[Any], memory_texts: Optional[Set[str]] = None) -> tuple[str, Set[str]]:
-    """Deduplicate and budget context; supports posts + PDF docs. Caps total size to ~12k chars."""
+    """Deduplicate and budget context; supports posts + PDF docs + Neo4j chunks. Caps total size to ~12k chars."""
     if memory_texts is None:
         memory_texts = set()
     seen_hashes: Set[str] = set()
@@ -88,14 +88,19 @@ def dedupe_chunks(chunks: List[Any], memory_texts: Optional[Set[str]] = None) ->
         if hasattr(chunk, 'payload'):
             payload = chunk.payload or {}
             text = (payload.get("chunk", "") or
-                    payload.get("chunk_text", "") or
-                    payload.get("summary", "") or
-                    payload.get("content", ""))
+                   payload.get("chunk_text", "") or
+                   payload.get("summary", "") or
+                   payload.get("content", ""))
         elif isinstance(chunk, dict):
+            # Handle Neo4j chunks which have a direct 'text' field
             text = (chunk.get("text", "") or
-                    chunk.get("chunk_text", "") or
-                    chunk.get("formatted_content", "") or
-                    chunk.get("content", "")).strip()
+                   chunk.get("chunk_text", "") or
+                   chunk.get("formatted_content", "") or
+                   chunk.get("content", "")).strip()
+            # Add source attribution for Neo4j chunks
+            source = chunk.get("source", "")
+            if source == "neo4j_chunk" and text:
+                text = f"[Neo4j Knowledge Graph Content] {text} [/Neo4j]"
         else:
             text = str(chunk or "").strip()
         if not text:
@@ -112,9 +117,8 @@ def dedupe_chunks(chunks: List[Any], memory_texts: Optional[Set[str]] = None) ->
         memory_texts.add(h)
     return "\n\n---\n\n".join(context), memory_texts
 
-
 def format_pdf_content(pdf_docs: List[Dict[str, Any]]) -> str:
-    """Format PDF document content for inclusion in the prompt"""
+    """Format PDF document content for inclusion in the prompt using enhanced metadata"""
     if not pdf_docs:
         return ""
     
@@ -128,30 +132,51 @@ def format_pdf_content(pdf_docs: List[Dict[str, Any]]) -> str:
             docs_by_id[doc_id] = {
                 'title': chunk.get('title', 'Unknown Document'),
                 'chunks': [],
-                'source_url': chunk.get('source_url', '')
+                'source_url': chunk.get('source_url', ''),
+                'max_score': 0.0
             }
         
-        chunk_text = chunk.get('text', chunk.get('chunk_text', ''))
-        if chunk_text:
-            chunk_info = f"Content: {chunk_text}"
-            if chunk.get('is_table', False):
-                chunk_info = f"Table Data: {chunk_text}"
-            docs_by_id[doc_id]['chunks'].append(chunk_info)
+        # Track maximum score per document
+        docs_by_id[doc_id]['max_score'] = max(
+            docs_by_id[doc_id]['max_score'], 
+            chunk.get('score', 0) + chunk.get('relevance_score', 0) * 0.3
+        )
+        
+        # Store formatted content with content type indicator
+        content_type = "Table Data" if chunk.get('is_table', False) else "Text"
+        formatted_text = chunk.get('formatted_content', chunk.get('text', ''))
+        
+        if formatted_text:
+            docs_by_id[doc_id]['chunks'].append({
+                'content_type': content_type,
+                'text': formatted_text,
+                'is_table': chunk.get('is_table', False)
+            })
     
-    # Format each document
-    for doc_id, doc_info in docs_by_id.items():
-        formatted_content += f"**Document: {doc_info['title']}**\n"
-        if doc_info['source_url']:
-            formatted_content += f"Source: {doc_info['source_url']}\n"
-        formatted_content += "\n"
+    # Sort documents by relevance score
+    sorted_docs = sorted(docs_by_id.values(), key=lambda x: x['max_score'], reverse=True)
+    
+    # Format each document section
+    for i, doc_info in enumerate(sorted_docs):
+        formatted_content += f"PDF Document {i+1}: {doc_info['title']}\n"
+        formatted_content += f"Source: {doc_info['source_url']}\n"
+        formatted_content += f"Relevance Score: {doc_info['max_score']:.3f}\n\n"
         
-        for i, chunk in enumerate(doc_info['chunks'][:3], 1):  # Limit to 3 chunks per doc
-            formatted_content += f"Excerpt {i}: {chunk}\n\n"
+        # Add table data first (often most structured)
+        tables = [c for c in doc_info['chunks'] if c.get('is_table', False)]
+        if tables:
+            formatted_content += "📊 TABLE DATA:\n"
+            for table in tables[:2]:  # Limit to 2 tables per document
+                formatted_content += f"{table['text']}\n\n"
         
-        if len(doc_info['chunks']) > 3:
-            formatted_content += f"... and {len(doc_info['chunks']) - 3} more excerpts\n\n"
+        # Add text content
+        texts = [c for c in doc_info['chunks'] if not c.get('is_table', False)]
+        if texts:
+            formatted_content += "📄 TEXT CONTENT:\n"
+            for chunk in texts[:3]:  # Limit to 3 text chunks per document
+                formatted_content += f"{chunk['text'][:800]}...\n\n"
         
-        formatted_content += "---\n\n"
+        formatted_content += "=" * 50 + "\n\n"
     
     return formatted_content
 
@@ -245,9 +270,9 @@ Module 4: Global Comparisons / Broader Context
 
 IMPORTANT : Use natural language and include tables or bullets if necessary. Cite source titles or entities whenever you use specific facts.
            The output provided by you must be grounded in the context provided. Any fact or data not present in the context is not permissible.
-           Try for 200 lines of content must be generated for each module. More is appreciated.
+           Try for 300-400 words of content must be generated for each module. More is appreciated.
            Try providing citations for all the facts and data you provide.
-
+           All the citations must be in the form of a list of references at the end of the response.
 Respond in JSON as per the specified schema.
 """
 
@@ -256,13 +281,26 @@ default_convo_system_message = "You are a finance expert analyst. Answer the que
 # === RAG Chain Builders ===
 
 def build_structured_rag_chain():
-    """Builds the chain for generating a structured JSON response."""
+    """Builds the chain for generating a structured JSON response with enhanced context handling."""
     format_instructions = parser.get_format_instructions()
     
+    # Updated prompt template with better source separation
     prompt_template = ChatPromptTemplate.from_messages([
         ("system", "{system_message}"),
         MessagesPlaceholder("history"),
-        ("human", "{question}\n\n=== QDRANT CONTEXT ===\n{chunks}\n\n{pdf_content}\n\n=== CITABLE GRAPH PATHS ===\n{paths}\n\nRespond in JSON as per this schema:\n{format_instructions}")
+        ("human", """{question}
+
+=== KNOWLEDGE CONTEXT ===
+{chunks}
+
+=== PDF DOCUMENT INSIGHTS ===
+{pdf_content}
+
+=== KNOWLEDGE GRAPH RELATIONSHIPS ===
+{paths}
+
+Respond in JSON as per this schema:
+{format_instructions}""")
     ])
 
     return (
@@ -284,11 +322,20 @@ def build_structured_rag_chain():
     )
 
 def build_convo_rag_chain():
-    """Builds the chain for generating a conversational text response."""
+    """Builds the chain for generating a conversational text response with enhanced context."""
     prompt_template = ChatPromptTemplate.from_messages([
         ("system", "{system_message}"),
         MessagesPlaceholder("history"),
-        ("human", "{question}\n\nRelevant Chunks:\n{chunks}\n\n{pdf_content}\n\nGraph Paths:\n{paths}")
+        ("human", """{question}
+
+=== KNOWLEDGE CONTEXT ===
+{chunks}
+
+=== PDF INSIGHTS ===
+{pdf_content}
+
+=== KNOWLEDGE GRAPH RELATIONSHIPS ===
+{paths}""")
     ])
 
     return (
