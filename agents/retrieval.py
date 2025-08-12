@@ -282,7 +282,7 @@ class RetrievalAgent:
         self.kg_reasoner = KGReasoner(self.neo4j_graph)
 
 
-    def retrieve_from_qdrant(self, query_text: str, top_k: int = 8):
+    def retrieve_from_qdrant(self, query_text: str, top_k: int = 15):
         """Search regular (non‑PDF) content in posts collection."""
         try:
             query_vector = self.embedder.embed_query(query_text)
@@ -293,7 +293,7 @@ class RetrievalAgent:
                 with_payload=True,
                 with_vectors=False,
                 timeout=10,
-                score_threshold=0.55,
+                score_threshold=0.35,
             )
             logger.info(f"[Qdrant posts] Retrieved {len(hits)} hits")
             
