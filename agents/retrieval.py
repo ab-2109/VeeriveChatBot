@@ -296,6 +296,20 @@ class RetrievalAgent:
                 score_threshold=0.55,
             )
             logger.info(f"[Qdrant posts] Retrieved {len(hits)} hits")
+            
+            # Print detailed chunk information
+            logger.info("=== QDRANT CHUNKS RETRIEVED ===")
+            for i, hit in enumerate(hits):
+                payload = hit.payload or {}
+                text_preview = payload.get('text', payload.get('content', ''))[:200]
+                logger.info(f"Chunk {i+1}:")
+                logger.info(f"  Score: {hit.score:.4f}")
+                logger.info(f"  PostID: {payload.get('postId', 'N/A')}")
+                logger.info(f"  Text preview: {text_preview}...")
+                logger.info(f"  Full payload keys: {list(payload.keys())}")
+                logger.info("  " + "-" * 50)
+            logger.info("=== END QDRANT CHUNKS ===")
+            
             return hits
         except Exception as e:
             logger.error(f"[Qdrant posts] Error: {e}")
@@ -594,6 +608,21 @@ class RetrievalAgent:
                 score_threshold=0.5,  # Lower threshold for PDFs as they might be more diverse
             )
             
+            # Print detailed PDF chunk information
+            logger.info("=== PDF CHUNKS RETRIEVED ===")
+            for i, hit in enumerate(hits):
+                payload = hit.payload or {}
+                text_preview = payload.get('chunk_text', '')[:200]
+                logger.info(f"PDF Chunk {i+1}:")
+                logger.info(f"  Score: {hit.score:.4f}")
+                logger.info(f"  Doc Title: {payload.get('doc_title', 'N/A')}")
+                logger.info(f"  Is Table: {payload.get('is_table', False)}")
+                logger.info(f"  Chunk ID: {payload.get('chunk_id', 'N/A')}")
+                logger.info(f"  Text preview: {text_preview}...")
+                logger.info(f"  Full payload keys: {list(payload.keys())}")
+                logger.info("  " + "-" * 50)
+            logger.info("=== END PDF CHUNKS ===")
+            
             # Apply additional filtering for PDF documents
             filtered_hits = []
             current_tags = getattr(self, 'current_tags', {})
@@ -629,6 +658,12 @@ class RetrievalAgent:
             final_hits = filtered_hits[:top_k]
             
             logger.info(f"Found {len(final_hits)} PDF document results (from {len(hits)} candidates)")
+            logger.info("=== FINAL FILTERED PDF CHUNKS ===")
+            for i, hit in enumerate(final_hits):
+                payload = hit.payload or {}
+                logger.info(f"Final PDF Chunk {i+1}: Score={hit.score:.4f}, Title={payload.get('doc_title', 'N/A')}")
+            logger.info("=== END FINAL PDF CHUNKS ===")
+            
             return final_hits
             
         except Exception as e:
