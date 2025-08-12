@@ -270,13 +270,14 @@ Module 4: Global Comparisons / Broader Context
 
 IMPORTANT : Use natural language and include tables or bullets if necessary. Cite source titles or entities whenever you use specific facts.
            The output provided by you must be grounded in the context provided. Any fact or data not present in the context is not permissible.
-           Try for 300-400 words of content must be generated for each module. More is appreciated.
-           Try providing citations for all the facts and data you provide.
+           Each and every bit of data provided must be utilised. Explain everything but remain grounded.
+           You must provide 300-400 words of content must be generated for each module and each line should not be less than 30-40 words. More is appreciated.
+           You must provide citations for all the facts and data you provide.
            All the citations must be in the form of a list of references at the end of the response.
 Respond in JSON as per the specified schema.
 """
 
-default_convo_system_message = "You are a finance expert analyst. Answer the query in a detailed, structured format. Answer in form of a analysis report, include tables if needed. Explain everything but remain grounded. Always included references and citations for all the facts and data you provide. Try explaining the concepts in a way that is easy to understand for a non-expert."
+default_convo_system_message = "You are a finance expert analyst. Answer the query in a detailed, structured format. Answer in form of a analysis report, include tables if needed. Each and every bit of data provided must be utilised. Explain everything but remain grounded. Always included references and citations for all the facts and data you provide. Try explaining the concepts in a way that is easy to understand for a non-expert. The length of report should be greater than 600 words."
 
 # === RAG Chain Builders ===
 
