@@ -91,7 +91,7 @@ class PromptSearcher:
                 limit=20,  # fetch more to rerank
                 with_payload=True,
                 with_vectors=False,
-                score_threshold=0.7,
+                score_threshold=0.4,
             )
 
             reranked = self.rerank_results(results, sector, subsector)
