@@ -262,8 +262,8 @@ def dedupe_chunks(chunks: List[Any], memory_texts: Optional[Set[str]] = None) ->
         memory_texts = set()
     seen_hashes: Set[str] = set()
     context: List[str] = []
-    total_budget = 12000
-    per_chunk_cap = 1500
+    total_budget = 20000
+    per_chunk_cap = 2500
     used = 0
 
     for chunk in chunks or []:
@@ -517,7 +517,7 @@ def build_convo_rag_chain():
             "chunks": dedupe_chunks(data["input_data"].get("qdrant_docs", []), set())[0],
             "pdf_content": format_pdf_content(data["input_data"].get("pdf_docs", [])),
             "paths": format_kg_paths(data["input_data"].get("kg_paths", [])),
-            "system_message": get_custom_prompt(data["input_data"]) or default_convo_system_message,
+            "system_message": default_convo_system_message,
             "history": []
         })
         | prompt_template
