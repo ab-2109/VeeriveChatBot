@@ -1,4 +1,3 @@
-
 """qdrant_maintainer.py — merged maintainer
 - Enrichment copied from qdbtest (robust scraping + company sites)
 - Chunked embedding/upsert to Qdrant (like qdbtest)
@@ -38,7 +37,7 @@ MONGO_DB = os.getenv("MONGO_DB", "veerive-db")
 
 QDRANT_URL = os.getenv("QDRANT_URL", "https://9c4151fc-4aaf-418b-ac17-970854ac8a8f.europe-west3-0.gcp.cloud.qdrant.io:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API", "")
-REGULAR_COLL = os.getenv("QDRANT_COLLECTION", "tester2")
+REGULAR_COLL = os.getenv("QDRANT_COLLECTION", "tester3")
 PDF_COLL = os.getenv("PDF_COLLECTION", "veerive_docs")
 PROMPT_COLL = "prompt-guidance"
 
@@ -224,16 +223,43 @@ class DatabaseSynchronizer:
                         if website2: post["secondarycompanydata"] = self._scrape_article(website2)
                 except Exception: post["secondarycompanydata"] = {}
 
+                # Ensure completeContent exists (do NOT overwrite if already in Mongo)
+                if "completeContent" not in post or not isinstance(post.get("completeContent"), str) or not post["completeContent"].strip():
+                    post["completeContent"] = self._build_fallback_complete_content(post)
+                    logger.debug(f"[completeContent] Fallback built for post {post['_id']}")
+                else:
+                    logger.debug(f"[completeContent] Using existing field for post {post['_id']} (len={len(post['completeContent'])})")
+
                 enriched.append(post)
             except Exception as e:
                 logger.error(f"[Enrich] Failed {post.get('_id')}: {e}")
                 continue
         return enriched
 
-    def _clean_text(self, txt: str) -> str:
-        if not txt: return ""
-        txt = re.sub(r"<[^>]+>", "", txt)
-        return re.sub(r"\s+", " ", txt).strip()
+    def _build_fallback_complete_content(self, post: Dict[str, Any]) -> str:
+        """Fallback builder ONLY when Mongo post lacks completeContent."""
+        parts = []
+        if post.get("postTitle"): parts.append(f"Title: {post['postTitle']}")
+        if post.get("summary"): parts.append(f"Summary: {post['summary']}")
+        ctx = [c.get("name","") for c in post.get("contexts",[]) if isinstance(c,dict)]
+        if ctx: parts.append("Contexts: " + ", ".join(ctx))
+        secs = [s.get("name","") for s in post.get("sectors",[]) if isinstance(s,dict)]
+        if secs: parts.append("Sectors: " + ", ".join(secs))
+        subsecs = [s.get("name","") for s in post.get("subsectors",[]) if isinstance(s,dict)]
+        if subsecs: parts.append("Subsectors: " + ", ".join(subsecs))
+        countries = [c.get("name","") for c in post.get("countries",[]) if isinstance(c,dict)]
+        if countries: parts.append("Countries: " + ", ".join(countries))
+        prim = [c.get("name","") for c in post.get("primaryCompanies",[]) if isinstance(c,dict)]
+        if prim: parts.append("Primary Companies: " + ", ".join(prim))
+        sec = [c.get("name","") for c in post.get("secondaryCompanies",[]) if isinstance(c,dict)]
+        if sec: parts.append("Secondary Companies: " + ", ".join(sec))
+        if post.get("scrapedArticle",{}).get("text"):
+            parts.append("Article Content:\n" + post["scrapedArticle"]["text"])
+        if post.get("primarycompanydata",{}).get("text"):
+            parts.append("Primary Company Information:\n" + post["primarycompanydata"]["text"])
+        if post.get("secondarycompanydata",{}).get("text"):
+            parts.append("Secondary Company Information:\n" + post["secondarycompanydata"]["text"])
+        return "\n\n".join(parts)
 
     def update_qdrant_chunks(self, posts: List[Dict[str, Any]]) -> bool:
         if not posts:
@@ -243,14 +269,24 @@ class DatabaseSynchronizer:
             batch_points = []
             for post in posts:
                 title = post.get("postTitle", "")
-                summary = post.get("summary", "")
-                contexts = " ".join([c.get("name", "") for c in post.get("contexts", []) if isinstance(c, dict)])
-                article_text = post.get("scrapedArticle", {}).get("text", "")
-                clean = self._clean_text(" ".join([title, contexts, summary, article_text]))
-                if not clean: continue
-                chunks = splitter.create_documents([clean])
+                # Prefer stored completeContent
+                full_content_raw = (post.get("completeContent") or "").strip()
+                if not full_content_raw:
+                    # Fallback to legacy assembly
+                    summary = post.get("summary", "")
+                    contexts = " ".join([c.get("name", "") for c in post.get("contexts", []) if isinstance(c, dict)])
+                    article_text = post.get("scrapedArticle", {}).get("text", "")
+                    full_content_raw = " ".join([title, contexts, summary, article_text])
+                    logger.debug(f"[update_qdrant_chunks] Fallback content used for post {post.get('_id')}")
+                else:
+                    logger.debug(f"[update_qdrant_chunks] Using completeContent for post {post.get('_id')} (len={len(full_content_raw)})")
+
+                
+                chunks = splitter.create_documents([full_content_raw])
                 texts = [c.page_content for c in chunks]
                 vectors = self.embedder.embed_documents(texts)
+
+                summary = post.get("summary", "")
                 for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
                     payload = {
                         "postId": str(post.get("_id", "")),
@@ -261,14 +297,18 @@ class DatabaseSynchronizer:
                         "summary": summary,
                         "primarydata": post.get("primarycompanydata", {}),
                         "secondarydata": post.get("secondarycompanydata", {}),
-                        "contexts": [c.get("name", "") for c in post.get("contexts", []) if isinstance(c, dict)]
+                        "contexts": [c.get("name", "") for c in post.get("contexts", []) if isinstance(c, dict)],
+                        "completeContent": full_content_raw  # expose raw combined content
                     }
                     pid = int(hashlib.md5(f"{payload['postId']}::{i}".encode()).hexdigest(), 16) % (2**63)
                     batch_points.append(PointStruct(id=pid, vector=vec, payload=payload))
+
                 if len(batch_points) >= 200:
                     ok = self._adaptive_upsert(batch_points)
                     batch_points = []
-                    if not ok: logger.error("Failed to upsert a chunk batch.")
+                    if not ok:
+                        logger.error("Failed to upsert a chunk batch.")
+
             if batch_points:
                 self._adaptive_upsert(batch_points)
             return True
@@ -358,19 +398,6 @@ def run_once_with_retries() -> bool:
         time.sleep(sleep_s)
     logger.error("Maintenance failed after maximum retries.")
     return False
-
-# def run_scheduler():
-#     """Run recurring maintenance using 'schedule' with the configured interval."""
-#     logger.info(f"Starting scheduler: every {SYNC_INTERVAL_MINUTES} minutes")
-#     schedule.every(SYNC_INTERVAL_MINUTES).minutes.do(run_once_with_retries)
-#     # Kick off the first run immediately
-#     run_once_with_retries()
-#     try:
-#         while True:
-#             schedule.run_pending()
-#             time.sleep(1)
-#     except KeyboardInterrupt:
-#         logger.info("Scheduler stopped by user.")
 
 if __name__ == "__main__":
     run_once_with_retries()

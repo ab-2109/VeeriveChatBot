@@ -402,14 +402,54 @@ function handleCompletedResponse(data) {
                 header.textContent = 'Structured Analysis';
                 structuredDiv.appendChild(header);
 
-                // Render modules as dropdown accordions in order
-                const order = ['module1','module2','module3','module4'];
-                order.forEach((mod, idx) => {
-                    if (structuredData[mod]) {
-                        const acc = renderModuleAccordion(mod, structuredData[mod], idx===0);
+                // --- Dynamic module rendering (replaces static 'order' array) ---
+                (function renderDynamicModules(sd) {
+                    if (!sd || typeof sd !== 'object') return;
+
+                    // Collect candidate module keys (objects or strings with content)
+                    let entries = Object.entries(sd).filter(([k,v]) => v && (typeof v === 'object' || typeof v === 'string'));
+
+                    // Separate keys that look like module numbers (module_1, module1, module_2, etc.)
+                    const moduleNumRegex = /^module[_]?(\d+)$/i;
+                    const scored = entries.map(([k,v], idx) => {
+                        const m = k.match(moduleNumRegex);
+                        return {
+                            key: k,
+                            val: v,
+                            order: m ? parseInt(m[1],10) : Number.MAX_SAFE_INTEGER - (entries.length - idx) // keep relative order for named modules
+                        };
+                    });
+
+                    // Sort: all numeric modules in ascending order first, then named ones in original order
+                    scored.sort((a,b) => a.order - b.order);
+
+                    if (scored.length === 0) return;
+
+                    scored.forEach((item, idx) => {
+                        // Normalize display title
+                        let displayKey = item.key
+                            .replace(/^module[_]?(\d+)$/i, (_,n) => `Module ${n}`)
+                            .replace(/_/g,' ')
+                            .replace(/([A-Z])/g,' $1')
+                            .replace(/\s+/g,' ')
+                            .trim();
+
+                        // Wrap simple string into object for uniform rendering
+                        let modData = item.val;
+                        if (typeof modData === 'string') {
+                            modData = { content: modData };
+                        }
+
+                        // Inject a title if missing
+                        if (typeof modData === 'object' && modData && !modData.title) {
+                            modData.title = displayKey;
+                        }
+
+                        const acc = renderModuleAccordion(displayKey, modData, idx === 0);
                         structuredDiv.appendChild(acc);
-                    }
-                });
+                    });
+                })(structuredData);
+                // --- End dynamic module rendering ---
 
                 messageContent.appendChild(structuredDiv);
             }

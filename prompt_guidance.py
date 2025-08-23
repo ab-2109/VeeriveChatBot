@@ -93,6 +93,7 @@ class PromptGuidanceHandler:
                 documents.append({
                     "id": str(doc.get("_id", "")),
                     "title": doc.get("title", ""),
+                    "module_description" : doc.get("moduleDescription", ""),
                     "prompt": doc.get("promptGuidance", ""),
                     "sector": sector_name,
                     "subsector": subsector_name,
@@ -116,6 +117,7 @@ class PromptGuidanceHandler:
             prompt = self.clean(raw_prompt)
             sector_name = doc.get("sector", "")
             subsector_name = doc.get("subsector", "")
+            module_desc = doc.get("module_description", "")
 
             logger.info(f"Processing: {title}")
             logger.info(f"Sector: {sector_name} | Subsector: {subsector_name}")
@@ -123,12 +125,13 @@ class PromptGuidanceHandler:
                 logger.warning(f"[Skip] Empty prompt or sector for: {title}")
                 return
 
-            combined_text = f"{sector_name} {subsector_name} {prompt}".strip()
+            combined_text = f"{module_desc} {title} {sector_name} {subsector_name}".strip()
             embedding = self.embedder.embed_query(combined_text)
 
             payload = {
                 "id": doc.get("id", ""),
                 "title": title,
+                "moduleDescription" : module_desc,
                 "prompt": prompt,
                 "sector": sector_name,
                 "subsector": subsector_name,
@@ -192,6 +195,7 @@ class PromptGuidanceHandler:
         for doc in documents:
             self.vectorize_and_upsert(doc)
         logger.info("✅ All prompts upserted successfully (run mode).")
+
 
 if __name__ == "__main__":
     handler = PromptGuidanceHandler()

@@ -133,6 +133,7 @@ def extract_metadata_from_post(doc: Dict[str, Any]) -> Dict[str, Any]:
         "contexts": [c.get("name", "") for c in doc.get("contexts", [])],
         "primaryCompanies": [c.get("name", "") for c in doc.get("primaryCompanies", [])],
         "secondaryCompanies": [c.get("name", "") for c in doc.get("secondaryCompanies", [])],
+        "completeContent": doc.get("completecontent", ""),
     }
 
 def setup_schema():
@@ -164,7 +165,7 @@ def setup_schema():
             IF NOT EXISTS
             FOR (c:Chunk) ON (c.embedding)
             OPTIONS {indexConfig: {
-                `vector.dimensions`: 1536,
+                `vector.dimensions`: 3072,
                 `vector.similarity_function`: 'cosine'
             }}
         """)
@@ -201,6 +202,7 @@ def fetch_documents_from_mongodb(limit=20, skip=0) -> Tuple[List[Dict[str, Any]]
             post["subsectors"] = resolve_references("subsectors", post.get("subsectors", []))
             post["themes"] = resolve_references("themes", post.get("themes", []))
             post["regions"] = resolve_references("regions", post.get("regions", []))
+            post["completeContent"] = post.get("completecontent", "")
             
             # Resolve source
             if post.get("source") and ObjectId.is_valid(post.get("source")):
@@ -243,10 +245,11 @@ def process_mongodb_document(doc):
         tags = doc.get("tags", {})
         created_at = doc.get("createdAt", datetime.now())
         source_url = doc.get("sourceUrl", "")
+        completeContent = doc.get("completeContent", "")
         
         # Extract text content for entity extraction
-        text_content = summary if summary else content
-        
+        text_content = completeContent
+
         if not text_content:
             logger.warning(f"No text content found for document {doc_id}, skipping")
             return
@@ -259,7 +262,8 @@ def process_mongodb_document(doc):
             "title": post_title,
             "summary": summary,
             "created_at": str(created_at),
-            "source_url": source_url
+            "source_url": source_url,
+            "completeContent": completeContent,
         }
         
         graph.query("""
@@ -268,6 +272,7 @@ def process_mongodb_document(doc):
                 d.summary = $summary,
                 d.created_at = $created_at,
                 d.source_url = $source_url
+            SET d.completeContent = $completeContent
             RETURN d
         """, doc_props)
         
