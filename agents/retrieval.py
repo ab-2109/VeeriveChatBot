@@ -250,7 +250,7 @@ class KGReasoner:
 class RetrievalAgent:
     def __init__(self, mongo_uri: str, qdrant_url: str, qdrant_key: str,
                  neo4j_uri: str, neo4j_user: str, neo4j_pass: str,
-                 qdrant_collection: str = "tester2",
+                 qdrant_collection: str = "tester3",
                  pdf_collection: str = "veerive_docs",  
                  embed_model: str = "text-embedding-3-large"):
 
