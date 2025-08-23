@@ -441,6 +441,9 @@ def build_structured_rag_chain():
         modules = []
         if custom_prompt_text:
             modules = extract_modules_from_text(custom_prompt_text)
+
+        if modules:
+            print(f"Dynamic modules extracted: {[m[0] for m in modules]}")
         
         # Get structured LLM with dynamic model
         structured_llm = get_structured_llm(modules)
