@@ -455,6 +455,55 @@ function handleCompletedResponse(data) {
             }
         }
         
+        // If we have structured data with modules, parse and format them
+        if (responseData.structured && responseData.structured.data) {
+            const structuredData = responseData.structured.data;
+            
+            // Get module keys (keys that match pattern "module_N" or just contain numbered modules)
+            const moduleKeys = Object.keys(structuredData).filter(k => 
+                k.match(/module[_]?\d+/i) || 
+                (structuredData[k] && structuredData[k].title)
+            );
+            
+            if (moduleKeys.length > 0) {
+                // This looks like a modular response - parse it into our format
+                const parsedModules = [];
+                
+                moduleKeys.sort((a, b) => {
+                    // Extract numbers for sorting
+                    const numA = parseInt((a.match(/\d+/) || [0])[0], 10);
+                    const numB = parseInt((b.match(/\d+/) || [0])[0], 10);
+                    return numA - numB;
+                }).forEach((key, idx) => {
+                    const module = structuredData[key];
+                    if (typeof module === 'object') {
+                        parsedModules.push({
+                            module: idx + 1,
+                            title: module.title || key.replace(/module[_]?/i, '').replace(/_/g, ' '),
+                            content: module.content || '',
+                            bullet_points: module.bullet_points || [],
+                            tables: module.tables || []
+                        });
+                    }
+                });
+                
+                debug("Parsed modules", parsedModules);
+                
+                // Format for display using the same consistent format
+                if (parsedModules.length > 0) {
+                    structuredDiv.innerHTML = ''; // Clear default rendering
+                    const header = document.createElement('h3');
+                    header.textContent = 'Structured Analysis';
+                    structuredDiv.appendChild(header);
+                    
+                    parsedModules.forEach((mod, idx) => {
+                        const acc = renderModuleAccordion(mod.title, mod, idx === 0);
+                        structuredDiv.appendChild(acc);
+                    });
+                }
+            }
+        }
+        
         // Fallback for other object formats
         if (!hasContent) {
             debug("No structured or conversational content found, using fallback");
@@ -890,3 +939,40 @@ document.addEventListener('DOMContentLoaded', () => {
         resetButton.addEventListener('click', resetConversationState);
     }
 });
+
+// Deterministic module parser in JS
+const HEADER_RE = /^\s*Module\s+(\d+)\s*[—\-–]\s*(.+?)\s*$/gm;
+
+function parseModules(text) {
+  let stripped = text.trim();
+  // strip surrounding triple quotes if pasted
+  if ((stripped.startsWith('"""') && stripped.endsWith('"""')) ||
+      (stripped.startsWith("'''") && stripped.endsWith("'''"))) {
+    stripped = stripped.slice(3, -3).trim();
+  }
+
+  const modules = [];
+  const index = {};
+  const matches = [...stripped.matchAll(HEADER_RE)];
+
+  if (matches.length === 0) return { modules, index };
+
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    const modNum = parseInt(m[1], 10);
+    const title = (m[2] || '').trim();
+    const start = m.index + m[0].length;
+    const end = (i + 1 < matches.length) ? matches[i + 1].index : stripped.length;
+    const content = stripped.slice(start, end).replace(/^\n+|\n+$/g, ""); // preserve as-is
+    const rec = { module: modNum, title, content };
+    modules.push(rec);
+    index[modNum] = rec;
+  }
+  return { modules, index };
+}
+
+function formatModulesForPrompt(modules) {
+  return modules
+    .map(m => `[Module ${m.module} — ${m.title}]\n${(m.content || "").trim()}`)
+    .join("\n\n");
+}

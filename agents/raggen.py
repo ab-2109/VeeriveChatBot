@@ -4,17 +4,15 @@ import logging
 from typing import List, Dict, Any, Optional, Set, Tuple
 import langchain.callbacks
 from langchain_openai import ChatOpenAI
-from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories.in_memory import ChatMessageHistory
 from pydantic import BaseModel, Field, create_model
 from dotenv import load_dotenv
-import langchain
-from langchain.callbacks.manager import CallbackManager
 import re
-from langchain_core.messages import AIMessage, BaseMessage
+import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -30,224 +28,264 @@ class TableData(BaseModel):
 
 class DynamicModuleData(BaseModel):
     title: str = Field(..., description="Module title")
-    content: str = Field(..., description="Module content")
+    content: str = Field(..., description="Module content - must be 300-400 words, comprehensive and detailed")
     bullet_points: List[str] = Field(default_factory=list, description="Key points")
     tables: List[TableData] = Field(default_factory=list, description="Tables if any")
     examples: List[str] = Field(default_factory=list, description="Examples if any")
 
-def create_dynamic_response_model(modules: List[Tuple[str, str]]) -> type:
-    """
-    Create a dynamic Pydantic model based on the modules found in the prompt.
-    
-    Args:
-        modules: List of (module_title, module_description) tuples
-    
-    Returns:
-        Dynamically created Pydantic model class
-    """
-    fields = {}
-    
-    for i, (title, description) in enumerate(modules):
-        # Clean the title to create a valid field name
-        field_name = f"module_{i+1}"
-        clean_title = re.sub(r'[^a-zA-Z0-9_]', '_', title.lower())
-        if clean_title and clean_title != 'module':
-            field_name = clean_title
-        
-        # Create field with description from the module content
-        fields[field_name] = (DynamicModuleData, Field(..., description=f"{title}: {description[:200]}..."))
-    
-    # If no modules found, fall back to generic structure
-    if not fields:
-        fields = {
-            "analysis": (DynamicModuleData, Field(..., description="General analysis")),
-            "insights": (DynamicModuleData, Field(..., description="Key insights")),
-            "recommendations": (DynamicModuleData, Field(..., description="Recommendations"))
-        }
-    
-    # Create the dynamic model
-    DynamicResponse = create_model(
-        'DynamicRAGResponse',
-        **fields,
-        __base__=BaseModel
-    )
-    
-    return DynamicResponse
-
-# === Enhanced Module Extraction ===
-def extract_modules_from_text(text: str) -> List[Tuple[str, str]]:
-    """
-    Extract modules and their descriptions from structured text with enhanced pattern matching.
-    
-    Args:
-        text: Text that may contain module definitions
-        
-    Returns:
-        List of (module_title, module_description) tuples
-    """
-    modules = []
-    
-    # Enhanced module patterns to catch various formats
-    module_patterns = [
-        # "Module 1:", "Module 1 —", "Module 1 -", "Module 1 – "
-        r'Module\s+(\d+|[A-Z])[:\s—–-]+\s*([^•]*?)(?=\s*(?:Module\s+(?:\d+|[A-Z])|$))',
-        # "Module 1: Title" followed by content
-        r'Module\s+(\d+|[A-Z])[:\s—–-]+\s*([^\n•]*?)(?:\n([^M]*?))?(?=\s*Module\s+(?:\d+|[A-Z])|$)',
-        # Numbered list format: "1.", "2.", etc.
-        r'(?:^|\n)\s*(\d+)[.:\s]\s*([^\n•]*?)(?:\n([^1-9]*?))?(?=\s*(?:(?:^|\n)\s*\d+[.:\s]|$))',
-        # Bullet points that might be modules
-        r'(?:^|\n)\s*[•-]\s*([^•\n-]*?)(?:\n([^•-]*?))?(?=\s*(?:(?:^|\n)\s*[•-]|$))'
-    ]
-    
-    for pattern_idx, pattern in enumerate(module_patterns):
-        matches = re.findall(pattern, text, re.DOTALL | re.MULTILINE | re.IGNORECASE)
-        if matches:
-            logger.info(f"Using pattern {pattern_idx} - found {len(matches)} matches")
-            
-            for match in matches:
-                if len(match) == 2:  # Simple format
-                    module_num, module_content = match
-                elif len(match) == 3:  # Format with title and content
-                    module_num, module_title, module_content = match
-                    if not module_content:
-                        module_content = module_title
-                        module_title = f"Module {module_num}"
-                else:
-                    continue
-                
-                # Clean up the content
-                content = (module_content or "").strip()
-                
-                # Extract title from content if not already separated
-                if len(match) == 2:
-                    title_match = re.match(r'^([^•\n-]*?)(?:[•\n-]|$)', content)
-                    module_title = title_match.group(1).strip() if title_match else f"Module {module_num}"
-                
-                # Clean up title and content
-                clean_title = re.sub(r'^[•\-\s]*', '', module_title).strip()
-                if not clean_title:
-                    clean_title = f"Module {module_num}"
-                
-                modules.append((clean_title, content))
-            
-            break  # Use the first pattern that works
-    
-    # Enhanced fallback: try to find section headers
-    if not modules:
-        logger.info("No module patterns found, trying section headers")
-        section_patterns = [
-            r'(?:^|\n)\s*([A-Z][^•\n]*?)(?:\n([^A-Z]*?))?(?=\s*(?:(?:^|\n)\s*[A-Z]|$))',
-            r'(?:^|\n)\s*([^•\n]{10,50})(?:\n([^•\n]*?))?(?=\s*(?:(?:^|\n)|$))'
-        ]
-        
-        for pattern in section_patterns:
-            matches = re.findall(pattern, text, re.DOTALL | re.MULTILINE)
-            if matches and len(matches) >= 2:  # At least 2 sections
-                for i, match in enumerate(matches[:8]):  # Limit to 8 sections
-                    title = match[0].strip() if match[0] else f"Section {i+1}"
-                    content = match[1].strip() if len(match) > 1 and match[1] else title
-                    if len(title) > 5 and len(content) > 10:  # Basic quality check
-                        modules.append((title, content))
-                break
-    
-    # Final fallback: split by bullets or paragraphs
-    if not modules:
-        logger.info("Using final fallback - splitting by structure")
-        # Try bullet points
-        bullet_matches = re.findall(r'[•-]\s*([^•-]*?)(?=\s*(?:[•-]|$))', text, re.DOTALL)
-        if bullet_matches and len(bullet_matches) >= 3:
-            for i, content in enumerate(bullet_matches[:6]):  # Limit to 6
-                content = content.strip()
-                if len(content) > 20:  # Substantial content
-                    title_match = re.match(r'^([^.\n]{5,50})', content)
-                    title = title_match.group(1).strip() if title_match else f"Point {i+1}"
-                    modules.append((title, content))
-        
-        # If still no modules, create generic ones
-        if not modules:
-            paragraphs = [p.strip() for p in text.split('\n\n') if len(p.strip()) > 50]
-            for i, para in enumerate(paragraphs[:4]):  # Max 4 paragraphs
-                title = f"Section {i+1}"
-                first_line = para.split('\n')[0][:50] + "..."
-                modules.append((first_line, para))
-    
-    logger.info(f"Extracted {len(modules)} modules: {[m[0] for m in modules]}")
-    return modules
-
-def adapt_module_based_prompt(modules: List[Tuple[str, str]]) -> str:
-    """
-    Create a comprehensive system message based on extracted modules.
-    
-    Args:
-        modules: List of (module_title, module_description) tuples
-        
-    Returns:
-        Adapted system message with the module structure
-    """
-    if not modules:
-        return None
-    
-    system_message = """You are a senior financial research analyst at a top-tier consulting firm. You provide comprehensive, data-driven analysis based on available context. 
-
-Based on the user's query and the provided context, generate a detailed response structured into the following modules:
-
-"""
-    
-    for i, (title, content) in enumerate(modules):
-        system_message += f"\n**Module {i+1}: {title}**\n"
-        
-        # Extract and format bullet points or key requirements
-        bullet_points = re.findall(r'(?:^|\n)\s*[-•]\s*(.*?)(?=\n\s*[-•]|\n\n|$)', content, re.DOTALL)
-        
-        if bullet_points:
-            for bullet in bullet_points:
-                cleaned_bullet = bullet.strip().replace('\n', ' ')
-                if len(cleaned_bullet) > 10:  # Skip very short bullets
-                    system_message += f"• {cleaned_bullet}\n"
-        else:
-            # Split content into logical parts
-            content_parts = [part.strip() for part in content.split('\n') if part.strip()]
-            for part in content_parts:
-                if len(part) > 15:  # Substantial content
-                    system_message += f"• {part}\n"
-    
-    system_message += """
-
-**CRITICAL INSTRUCTIONS:**
-- Use ONLY the information provided in the context. Do not add external knowledge.
-- Each module must contain 300-400 words of substantial content.
-- Include specific data points, figures, and examples from the context.
-- Create tables where data allows for structured comparison.
-- Cite sources for all facts and claims using exact entity names or document titles.
-- Ensure every piece of provided data is utilized effectively.
-- Write each sentence with 30-40+ words for comprehensive coverage.
-- Format response as structured JSON matching the specified schema.
-
-**OUTPUT FORMAT:** Respond in JSON format with each module as a separate field containing title, content, bullet_points, tables, and examples as appropriate."""
-
-    return system_message
-
-# === Initialize LLM ===
-llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=os.getenv("OPENAI_API_KEY"))
-
-# Global variable to store current response model
+# Global variables for models
 current_response_model = None
 llm_struct = None
+USE_LLM_MODULE_PARSE = os.getenv("ENABLE_LLM_MODULE_PARSE", "0") == "1"
 
-def get_structured_llm(modules: List[Tuple[str, str]]):
+# === Advanced Module Parsing Functions ===
+def parse_modules_robust(text: str) -> List[Dict[str, Any]]:
+    """
+    Robust module parsing that handles various formats and inline modules.
+    Returns list of modules with sequential numbering for schema creation.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return []
+
+    # Strip surrounding triple quotes
+    if (stripped.startswith('"""') and stripped.endswith('"""')) or \
+       (stripped.startswith("'''") and stripped.endswith("'''")):
+        stripped = stripped[3:-3].strip()
+
+    logger.info(f"Parsing text length: {len(stripped)}")
+    logger.info(f"First 200 chars: {stripped[:200]}")
+    
+    modules = []
+    
+    # Method 1: Split-based parsing for inline modules
+    # This handles cases where modules are on the same line or poorly separated
+    module_pattern = r'Module\s+(\d+)\s*[—\-–—]\s*'
+    splits = re.split(module_pattern, stripped, flags=re.IGNORECASE)
+    
+    if len(splits) > 2:  # We have actual splits
+        logger.info(f"Found {(len(splits)-1)//2} modules using split method")
+        
+        # Process splits: [preamble, num1, content1, num2, content2, ...]
+        for i in range(1, len(splits), 2):
+            if i + 1 < len(splits):
+                mod_num = int(splits[i])
+                content = splits[i + 1].strip()
+                
+                # Extract title from content (first meaningful part before bullet or long description)
+                title_patterns = [
+                    r'^([^•\n]{10,80}?)(?:\s*[•\n]|$)',  # Before bullet or newline
+                    r'^([^•]{10,80}?)(?:\s*[•]|$)',      # Before bullet
+                    r'^(.{10,80}?)(?:\s|$)'              # First 10-80 chars
+                ]
+                
+                title = f"Module {mod_num}"
+                for pattern in title_patterns:
+                    title_match = re.match(pattern, content)
+                    if title_match:
+                        candidate = title_match.group(1).strip()
+                        # Clean up common artifacts
+                        candidate = re.sub(r'\s*Module\s+\d+.*$', '', candidate, flags=re.IGNORECASE)
+                        candidate = re.sub(r'[•\-—]+.*$', '', candidate)
+                        if len(candidate) > 5 and len(candidate) < 100:
+                            title = candidate
+                            break
+                
+                modules.append({
+                    "module": len(modules) + 1,  # Sequential numbering for schema
+                    "original_number": mod_num,
+                    "title": title,
+                    "content": content
+                })
+                logger.info(f"Parsed Module {mod_num} -> Schema Module {len(modules)}: {title[:50]}...")
+    
+    # Method 2: Regex-based parsing as fallback
+    if not modules:
+        logger.info("Split method failed, trying regex method")
+        module_regex = r'Module\s+(\d+)\s*[—\-–—]\s*([^•]*?)(?=Module\s+\d+|$)'
+        matches = list(re.finditer(module_regex, stripped, re.IGNORECASE | re.DOTALL))
+        
+        for i, match in enumerate(matches):
+            mod_num = int(match.group(1))
+            full_content = match.group(2).strip()
+            
+            # Extract title (first line or first part before bullet)
+            title_match = re.match(r'^([^•\n]{5,80}?)(?:[•\n]|$)', full_content)
+            title = title_match.group(1).strip() if title_match else f"Module {mod_num}"
+            
+            modules.append({
+                "module": i + 1,  # Sequential numbering
+                "original_number": mod_num,
+                "title": title,
+                "content": full_content
+            })
+            logger.info(f"Regex parsed Module {mod_num} -> Schema Module {i+1}: {title[:50]}...")
+    
+    # Method 3: Bullet-point based parsing if still no modules
+    if not modules:
+        logger.info("Regex method failed, trying bullet-point extraction")
+        modules = _extract_from_bullets(stripped)
+    
+    # Final validation and cleanup
+    if not modules:
+        logger.warning("All parsing methods failed, creating default modules")
+        modules = [
+            {"module": 1, "title": "Analysis Overview", "content": stripped[:500] + "..."},
+            {"module": 2, "title": "Key Insights", "content": stripped[500:1000] + "..."},
+            {"module": 3, "title": "Strategic Implications", "content": stripped[1000:] or "Additional analysis needed"}
+        ]
+    
+    logger.info(f"Final module count: {len(modules)}")
+    return modules
+
+def _extract_from_bullets(text: str) -> List[Dict[str, Any]]:
+    """Extract modules from bullet-pointed or structured text."""
+    modules = []
+    
+    # Try different bullet patterns
+    bullet_patterns = [
+        r'[•▪▫–—-]\s*([^•▪▫–—-\n]{20,}?)(?=\s*[•▪▫–—-]|$)',
+        r'(?:^|\n)\s*[-*]\s*([^-*\n]{20,}?)(?=\s*(?:^|\n)\s*[-*]|$)',
+        r'(?:^|\n)\s*(\d+\.?\s*[^0-9\n]{20,}?)(?=\s*(?:^|\n)\s*\d+\.|$)'
+    ]
+    
+    for pattern in bullet_patterns:
+        matches = re.findall(pattern, text, re.MULTILINE | re.DOTALL)
+        if matches and len(matches) >= 2:
+            for i, content in enumerate(matches[:8]):  # Max 8 modules
+                content = content.strip()
+                if len(content) > 15:
+                    # Extract title from first part
+                    title_match = re.match(r'^([^.!?]{5,60})', content)
+                    title = title_match.group(1).strip() if title_match else f"Section {i+1}"
+                    
+                    modules.append({
+                        "module": i + 1,
+                        "title": title,
+                        "content": content
+                    })
+            break
+    
+    return modules
+
+# === Model Creation ===
+def create_dynamic_response_model(modules: List[Dict[str, Any]]) -> type:
+    """Create dynamic Pydantic model with module_N fields based on parsed modules."""
+    fields = {}
+    
+    # Ensure we have at least some modules
+    if not modules:
+        modules = [
+            {"title": "Executive Analysis", "content": "General strategic analysis"},
+            {"title": "Key Metrics", "content": "Important quantitative indicators"},
+            {"title": "Strategic Recommendations", "content": "Strategic opportunities and next steps"}
+        ]
+    
+    # Create fields for each module
+    for i, module in enumerate(modules, 1):
+        field_name = f"module_{i}"
+        title = module.get("title", f"Module {i}")
+        content_desc = module.get("content", "")[:200] + "..." if len(module.get("content", "")) > 200 else module.get("content", "")
+        
+        # Create comprehensive field description
+        field_desc = f"MANDATORY: Complete analysis for '{title}'. Content requirements: {content_desc}. Must provide 300-400 words with comprehensive coverage including all specified elements, metrics, examples, and detailed insights."
+        
+        fields[field_name] = (
+            DynamicModuleData, 
+            Field(..., description=field_desc)
+        )
+    
+    logger.info(f"Created dynamic model with {len(fields)} REQUIRED modules: {list(fields.keys())}")
+    
+    return create_model('DynamicRAGResponse', **fields, __base__=BaseModel)
+
+def get_structured_llm(modules: List[Dict[str, Any]]):
     """Get LLM instance with structured output for the current modules."""
     global current_response_model, llm_struct
     
     # Create dynamic model based on modules
     current_response_model = create_dynamic_response_model(modules)
     
-    # Create LLM with structured output
-    llm_struct = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=os.getenv("OPENAI_API_KEY")) \
-        .with_structured_output(current_response_model)
+    # Use GPT-4 with function calling for structured output (more reliable)
+    llm_struct = ChatOpenAI(
+        model="gpt-4.1",
+        temperature=1,
+        api_key=os.getenv("OPENAI_API_KEY")
+    ).with_structured_output(current_response_model, method="function_calling")
     
     return llm_struct
 
-# === Conversational Memory Setup ===
+# === Prompt Processing Utilities ===
+def coerce_prompt_to_text(custom_prompt) -> str:
+    """Coerce arbitrary prompt container into a plain text string."""
+    if isinstance(custom_prompt, str):
+        return custom_prompt
+    if isinstance(custom_prompt, dict):
+        return (custom_prompt.get("content") or custom_prompt.get("prompt") or "")
+    if isinstance(custom_prompt, list):
+        parts = []
+        for item in custom_prompt:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(item.get("content") or item.get("prompt") or "")
+        return "\n\n".join(p for p in parts if p)
+    return ""
+
+def format_modules_for_prompt(modules: List[Dict[str, Any]]) -> str:
+    """Format modules into a clear prompt structure."""
+    formatted_sections = []
+    
+    for module in modules:
+        section = f"[Module {module['module']} — {module['title']}]\n{module['content'].strip()}"
+        formatted_sections.append(section)
+    
+    return "\n\n".join(formatted_sections)
+
+def get_custom_prompt(input_data: Dict[str, Any]) -> Optional[str]:
+    """Build comprehensive system prompt with module requirements."""
+    try:
+        raw_prompt = coerce_prompt_to_text(input_data.get("prompt"))
+        if not raw_prompt or len(raw_prompt.strip()) < 5:
+            return None
+
+        modules = parse_modules_robust(raw_prompt)
+        formatted_modules = format_modules_for_prompt(modules)
+
+        # Comprehensive system instructions
+        critical_instructions = f"""CRITICAL EXECUTION REQUIREMENTS:
+
+1. MANDATORY MODULE COMPLETION:
+   - You MUST generate content for ALL {len(modules)} modules specified above
+   - Each module is REQUIRED and must contain substantial, detailed analysis
+   - NO module may be left empty, incomplete, or with placeholder content
+
+2. CONTENT QUALITY STANDARDS:
+   - Each module must contain 300-400 words of comprehensive, data-rich content
+   - Include specific examples, metrics, and detailed insights for each module
+   - Address ALL requirements explicitly mentioned in each module description
+   - If module mentions comparisons, scenarios, personas, or metrics - include ALL of them
+
+3. STRUCTURE REQUIREMENTS:
+   - Use tables for comparative data where specified
+   - Include bullet points for key insights within each module
+   - Provide specific examples and concrete details, not generalities
+   - Ensure each module is substantive and actionable
+
+4. JSON OUTPUT REQUIREMENTS:
+   - Return ONLY valid JSON with no markdown formatting
+   - Every module field (module_1, module_2, etc.) must be populated
+   - Each module must have title, content, and relevant supporting elements
+
+FAILURE TO COMPLETE ALL MODULES WILL RESULT IN AN INCOMPLETE ANALYSIS."""
+
+        return f"{formatted_modules}\n\n{critical_instructions}"
+        
+    except Exception as e:
+        logger.error(f"Error processing custom prompt: {e}")
+        return None
+
+# === Conversation Memory Setup ===
 convo_buffers: Dict[str, ChatMessageHistory] = {}
 
 def get_user_convo_history(session_id: str) -> ChatMessageHistory:
@@ -256,18 +294,11 @@ def get_user_convo_history(session_id: str) -> ChatMessageHistory:
     return convo_buffers[session_id]
 
 # === Helper Functions ===
-def dedupe_chunks(chunks: List[Any], memory_texts: Optional[Set[str]] = None) -> tuple[str, Set[str]]:
-    """Deduplicate and budget context; supports posts + PDF docs + Neo4j chunks. Caps total size to ~12k chars."""
-    if memory_texts is None:
-        memory_texts = set()
-    seen_hashes: Set[str] = set()
-    context: List[str] = []
-    total_budget = 20000
-    per_chunk_cap = 2500
-    used = 0
-
+def format_chunks(chunks: List[Any]) -> str:
+    """Format chunks without deduplication."""
+    context = []
+    
     for chunk in chunks or []:
-        text = ""
         if hasattr(chunk, 'payload'):
             payload = chunk.payload or {}
             text = (payload.get("chunk", "") or
@@ -284,78 +315,27 @@ def dedupe_chunks(chunks: List[Any], memory_texts: Optional[Set[str]] = None) ->
                 text = f"[Neo4j Knowledge Graph Content] {text} [/Neo4j]"
         else:
             text = str(chunk or "").strip()
-        if not text:
-            continue
-        text = text[:per_chunk_cap]
-        h = hashlib.md5(text.encode()).hexdigest()
-        if h in seen_hashes or h in memory_texts:
-            continue
-        if used + len(text) + 5 > total_budget:
-            break
-        context.append(text)
-        used += len(text) + 5
-        seen_hashes.add(h)
-        memory_texts.add(h)
-    return "\n\n---\n\n".join(context), memory_texts
+        
+        if text:
+            context.append(text)
+    
+    return "\n\n---\n\n".join(context)
 
 def format_pdf_content(pdf_docs: List[Dict[str, Any]]) -> str:
-    """Format PDF document content for inclusion in the prompt using enhanced metadata"""
+    """Format PDF document content for inclusion in the prompt."""
     if not pdf_docs:
         return ""
     
     formatted_content = "\n\n=== RELEVANT PDF DOCUMENTS ===\n\n"
     
-    # Group by document
-    docs_by_id = {}
     for chunk in pdf_docs:
-        doc_id = chunk.get('id', 'unknown')
-        if doc_id not in docs_by_id:
-            docs_by_id[doc_id] = {
-                'title': chunk.get('title', 'Unknown Document'),
-                'chunks': [],
-                'source_url': chunk.get('source_url', ''),
-                'max_score': 0.0
-            }
-        
-        docs_by_id[doc_id]['max_score'] = max(
-            docs_by_id[doc_id]['max_score'], 
-            chunk.get('score', 0) + chunk.get('relevance_score', 0) * 0.3
-        )
-        
-        content_type = "Table Data" if chunk.get('is_table', False) else "Text"
-        formatted_text = chunk.get('formatted_content', chunk.get('text', ''))
-        
-        if formatted_text:
-            docs_by_id[doc_id]['chunks'].append({
-                'content_type': content_type,
-                'text': formatted_text,
-                'is_table': chunk.get('is_table', False)
-            })
-    
-    sorted_docs = sorted(docs_by_id.values(), key=lambda x: x['max_score'], reverse=True)
-    
-    for i, doc_info in enumerate(sorted_docs):
-        formatted_content += f"PDF Document {i+1}: {doc_info['title']}\n"
-        formatted_content += f"Source: {doc_info['source_url']}\n"
-        formatted_content += f"Relevance Score: {doc_info['max_score']:.3f}\n\n"
-        
-        tables = [c for c in doc_info['chunks'] if c.get('is_table', False)]
-        if tables:
-            formatted_content += "📊 TABLE DATA:\n"
-            for table in tables[:2]:
-                formatted_content += f"{table['text']}\n\n"
-        
-        texts = [c for c in doc_info['chunks'] if not c.get('is_table', False)]
-        if texts:
-            formatted_content += "📄 TEXT CONTENT:\n"
-            for chunk in texts[:3]:
-                formatted_content += f"{chunk['text'][:800]}...\n\n"
-        
+        formatted_content += f"{chunk.get('text', '')[:800]}...\n\n"
         formatted_content += "=" * 50 + "\n\n"
     
     return formatted_content
 
 def format_kg_paths(paths: List[Dict[str, Any]]) -> str:
+    """Format knowledge graph paths for prompt inclusion."""
     output = []
     for p in paths:
         if isinstance(p, dict):
@@ -366,92 +346,28 @@ def format_kg_paths(paths: List[Dict[str, Any]]) -> str:
                 output.append(f"- [{p['title']}]({p.get('url', '')})")
     return "\n".join(output)
 
-# === Enhanced Prompt Processing ===
-def get_custom_prompt(input_data: Dict[str, Any]) -> Optional[str]:
-    """
-    Extract and adapt custom prompts with flexible module structure support.
-    
-    Args:
-        input_data: The input data that might contain a custom prompt
-        
-    Returns:
-        Optional[str]: The custom prompt if available, None otherwise
-    """
-    try:
-        if "prompt" in input_data:
-            custom_prompt = input_data.get("prompt")
-            
-            if isinstance(custom_prompt, str) and len(custom_prompt.strip()) > 10:
-                modules = extract_modules_from_text(custom_prompt)
-                if modules:
-                    return adapt_module_based_prompt(modules)
-                logger.info("Using custom prompt string")
-                return custom_prompt
-                
-            if not custom_prompt or (isinstance(custom_prompt, list) and len(custom_prompt) == 0):
-                logger.info("No custom prompt available")
-                return None
-                
-            if isinstance(custom_prompt, dict) and "content" in custom_prompt:
-                content = custom_prompt["content"]
-                modules = extract_modules_from_text(content)
-                if modules:
-                    return adapt_module_based_prompt(modules)
-                logger.info("Using custom prompt from dictionary")
-                return content
-                
-            if isinstance(custom_prompt, list) and len(custom_prompt) > 0:
-                if isinstance(custom_prompt[0], dict) and "prompt" in custom_prompt[0]:
-                    prompt_text = custom_prompt[0]["prompt"]
-                    if prompt_text and isinstance(prompt_text, str):
-                        title = custom_prompt[0].get('title', 'Untitled')
-                        
-                        modules = extract_modules_from_text(prompt_text)
-                        if modules:
-                            adapted_prompt = adapt_module_based_prompt(modules)
-                            logger.info(f"Using module-based custom prompt: {title} (modules: {len(modules)})")
-                            return adapted_prompt
-                        
-                        logger.info(f"Using custom prompt: {title}")
-                        return prompt_text
-                        
-                elif isinstance(custom_prompt[0], str) and len(custom_prompt[0].strip()) > 10:
-                    modules = extract_modules_from_text(custom_prompt[0])
-                    if modules:
-                        return adapt_module_based_prompt(modules)
-                    logger.info("Using first prompt from list of strings")
-                    return custom_prompt[0]
-                    
-    except Exception as e:
-        logger.error(f"Error processing custom prompt: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    
-    return None
-
-# === RAG Chain Builders ===
+# === RAG Chain Builder ===
 def build_structured_rag_chain():
-    """Builds the chain for generating a structured JSON response with dynamic modules."""
+    """Build chain that dynamically creates schema based on parsed modules."""
     
     def get_dynamic_chain(data):
-        """Create chain with dynamic model based on prompt modules."""
-        custom_prompt_text = get_custom_prompt(data["input_data"])
-        
-        # Extract modules to create dynamic model
-        modules = []
-        if custom_prompt_text:
-            modules = extract_modules_from_text(custom_prompt_text)
+        input_data = data["input_data"]
 
-        if modules:
-            print(f"Dynamic modules extracted: {[m[0] for m in modules]}")
-        
-        # Get structured LLM with dynamic model
+        raw_prompt = coerce_prompt_to_text(input_data.get("prompt"))
+        if not raw_prompt.strip():
+            raw_prompt = "You are a financial analyst. Provide comprehensive structured analysis with multiple detailed modules covering all aspects of the topic."
+
+        # Parse modules and create dynamic schema
+        modules = parse_modules_robust(raw_prompt)
+        logger.info(f"Building chain with {len(modules)} modules: {[m['title'][:50] for m in modules]}")
+
         structured_llm = get_structured_llm(modules)
-        
-        # Create parser for current model
         parser = PydanticOutputParser(pydantic_object=current_response_model)
         format_instructions = parser.get_format_instructions()
-        
+
+        system_message = get_custom_prompt({"prompt": raw_prompt}) or raw_prompt
+
+        # Enhanced prompt template with strong module requirements
         prompt_template = ChatPromptTemplate.from_messages([
             ("system", "{system_message}"),
             MessagesPlaceholder("history"),
@@ -466,70 +382,62 @@ def build_structured_rag_chain():
 === KNOWLEDGE GRAPH RELATIONSHIPS ===
 {paths}
 
-Respond in JSON as per this schema:
+🚨 CRITICAL REQUIREMENT 🚨
+You MUST provide comprehensive analysis for ALL modules specified in the system message.
+- Each module requires 300-400 words of detailed, substantive content
+- Address every requirement mentioned in each module description
+- Include specific examples, metrics, comparisons, and detailed insights
+- ALL module fields in your JSON response are mandatory and must be fully populated
+- Incomplete responses will be rejected
+
+Generate your response in the following JSON format:
 {format_instructions}""")
         ])
-        
-        # Prepare data for prompt
+
         prompt_data = {
-            "question": data["input_data"].get("refined_query", {}).get("refined_query", "Query not found"),
-            "chunks": dedupe_chunks(data["input_data"].get("qdrant_docs", []), set())[0],
-            "pdf_content": format_pdf_content(data["input_data"].get("pdf_docs", [])),
-            "paths": format_kg_paths(data["input_data"].get("kg_paths", [])),
-            "system_message": custom_prompt_text or "You are a financial analyst. Provide detailed analysis.",
+            "question": input_data.get("refined_query", {}).get("refined_query", "Provide comprehensive analysis"),
+            "chunks": format_chunks(input_data.get("qdrant_docs", [])),
+            "pdf_content": format_pdf_content(input_data.get("pdf_docs", [])),
+            "paths": format_kg_paths(input_data.get("kg_paths", [])),
+            "system_message": system_message,
             "format_instructions": format_instructions,
             "history": []
         }
+
+        formatted_messages = prompt_template.format_messages(**prompt_data)
+        logger.info(f"Invoking LLM with {len(modules)} required modules...")
         
-        # Execute the chain
-        formatted_prompt = prompt_template.format_messages(**prompt_data)
-        response = structured_llm.invoke(formatted_prompt)
-        
-        return response.dict() if hasattr(response, 'dict') else response
+        try:
+            response = structured_llm.invoke(formatted_messages)
+            
+            # Validate response completeness
+            if hasattr(response, "dict"):
+                response_dict = response.dict()
+                expected_modules = [f"module_{i}" for i in range(1, len(modules) + 1)]
+                populated_modules = [k for k in response_dict.keys() if k.startswith("module_")]
+                
+                logger.info(f"Expected: {len(expected_modules)} modules, Got: {len(populated_modules)} modules")
+                
+                if len(populated_modules) < len(expected_modules):
+                    logger.warning(f"Incomplete response: {len(populated_modules)}/{len(expected_modules)} modules populated")
+                    # Log which modules are missing
+                    missing = set(expected_modules) - set(populated_modules)
+                    logger.warning(f"Missing modules: {missing}")
+                else:
+                    logger.info("✅ All modules successfully populated")
+                
+                return response_dict
+            else:
+                return response
+                
+        except Exception as e:
+            logger.error(f"LLM invocation failed: {e}")
+            raise
 
-    return (
-        {"input_data": RunnablePassthrough()}
-        | RunnableLambda(get_dynamic_chain)
-    )
+    return {"input_data": RunnablePassthrough()} | RunnableLambda(get_dynamic_chain)
 
-default_convo_system_message = "You are a finance expert analyst. Answer the query in a detailed, structured format. Answer in form of a analysis report, include tables if needed. Each and every bit of data provided must be utilised. Explain everything but remain grounded. Always included references and citations for all the facts and data you provide. Try explaining the concepts in a way that is easy to understand for a non-expert. The length of report should be greater than 600 words."
-
-def build_convo_rag_chain():
-    """Builds the chain for generating a conversational text response with enhanced context."""
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("system", "{system_message}"),
-        MessagesPlaceholder("history"),
-        ("human", """{question}
-
-=== KNOWLEDGE CONTEXT ===
-{chunks}
-
-=== PDF INSIGHTS ===
-{pdf_content}
-
-=== KNOWLEDGE GRAPH RELATIONSHIPS ===
-{paths}""")
-    ])
-
-    return (
-        {
-            "input_data": RunnablePassthrough()
-        }
-        | RunnableLambda(lambda data: {
-            "question": data["input_data"].get("refined_query", {}).get("refined_query", "Query not found"),
-            "chunks": dedupe_chunks(data["input_data"].get("qdrant_docs", []), set())[0],
-            "pdf_content": format_pdf_content(data["input_data"].get("pdf_docs", [])),
-            "paths": format_kg_paths(data["input_data"].get("kg_paths", [])),
-            "system_message": default_convo_system_message,
-            "history": []
-        })
-        | prompt_template
-        | llm
-        | StrOutputParser()
-    )
-
+# === Response Generation ===
 structured_rag_chain = build_structured_rag_chain()
-convo_rag_chain = build_convo_rag_chain()
 
 structured_chain_with_memory = RunnableWithMessageHistory(
     structured_rag_chain,
@@ -538,102 +446,227 @@ structured_chain_with_memory = RunnableWithMessageHistory(
     history_messages_key="history"
 )
 
-convo_chain_with_memory = RunnableWithMessageHistory(
-    convo_rag_chain,
-    get_session_history=get_user_convo_history,
-    input_messages_key="input_data",
-    history_messages_key="history"
-)
-
 def generate_structured_response(input_data: Dict[str, Any], session_id: str = "default"):
-    """Generates a structured response with robust error handling and dynamic modules."""
+    """Generate structured response with comprehensive error handling."""
     try:
         qdrant_count = len(input_data.get("qdrant_docs", []))
         pdf_count = len(input_data.get("pdf_docs", []))
-        logger.info(f"Generating structured response with {qdrant_count} vector docs and {pdf_count} PDF docs.")
+        logger.info(f"Generating structured response with {qdrant_count} vector docs and {pdf_count} PDF docs")
 
-        result = structured_chain_with_memory.invoke(input_data, config={"configurable": {"session_id": session_id}})
+        result = structured_chain_with_memory.invoke(
+            input_data, 
+            config={"configurable": {"session_id": session_id}}
+        )
         
         if isinstance(result, dict):
+            # Log success metrics
+            module_count = len([k for k in result.keys() if k.startswith("module_")])
+            logger.info(f"✅ Successfully generated response with {module_count} modules")
             return {"status": "success", "data": result}
         
-        raise TypeError(f"Expected a dictionary from the structured chain, but got {type(result)}")
+        raise TypeError(f"Expected dict from structured chain, got {type(result)}")
 
     except Exception as e:
         logger.error(f"Structured response generation failed: {e}", exc_info=True)
-        return {"status": "error", "data": None, "message": f"Structured generation failed: {str(e)}"}
-
-def generate_conversational_response(input_data: Dict[str, Any], session_id: str = "default"):
-    """Generate conversational response."""
-    try:
-        logger.info(f"Generating conversational response for session: {session_id}")
-        
-        result_text = convo_chain_with_memory.invoke(input_data, config={"configurable": {"session_id": session_id}})
-        
-        logger.info("Conversational response generated successfully.")
-        return {"status": "success", "data": result_text}
-    except Exception as e:
-        logger.error(f"Conversational generation error: {str(e)}", exc_info=True)
-        return {"status": "error", "data": "Failed to generate response.", "message": str(e)}
+        return {
+            "status": "error", 
+            "data": None, 
+            "message": f"Structured generation failed: {str(e)}"
+        }
 
 def run_rag_generator(input_data: Dict[str, Any], session_id: str = "default"):
-    """Generate both structured and conversational responses with enhanced logging and error handling."""
+    """Main RAG generation function with comprehensive logging."""
     if not isinstance(session_id, str):
         raise ValueError("session_id must be a string")
     
-    logger.info(f"Starting RAG generation for session: {session_id}")
+    logger.info(f"🚀 Starting RAG generation for session: {session_id}")
     
-    # Log input statistics
+    # Log comprehensive input statistics
     query = input_data.get("refined_query", {}).get("refined_query", "Unknown query")
     qdrant_count = len(input_data.get("qdrant_docs", []))
     pdf_count = len(input_data.get("pdf_docs", []))
     kg_paths_count = len(input_data.get("kg_paths", []))
     kg_insights_count = len(input_data.get("kg_insights", []))
-    prompt_count = len(input_data.get("prompt", []) if isinstance(input_data.get("prompt"), list) else 0)
     
     logger.info(f"Query: {query[:100]}...")
-    logger.info(f"Resources: {qdrant_count} vector docs, {pdf_count} PDFs, {kg_paths_count} KG paths, "
-               f"{kg_insights_count} KG insights, {prompt_count} custom prompts")
+    logger.info(f"📊 Resources: {qdrant_count} vector docs, {pdf_count} PDFs, {kg_paths_count} KG paths, {kg_insights_count} KG insights")
     
-    # Generate both response types
+    # Generate structured response
     structured_response = generate_structured_response(input_data, session_id)
-    convo_response = generate_conversational_response(input_data, session_id)
-    
-    # PDF content for frontend
     pdf_content = format_pdf_content(input_data.get("pdf_docs", []))
     
-    # Create combined result
+    # Compile final result
     result = {
         "structured": {
             "status": structured_response.get("status", "error"),
             "data": structured_response.get("data", {}),
             "error": structured_response.get("message", None) if structured_response.get("status", "") == "error" else None
         },
-        "conversational": {
-            "status": convo_response.get("status", "error"),
-            "data": convo_response.get("data", "No response generated"),
-            "error": convo_response.get("message", None) if convo_response.get("status", "") == "error" else None
-        },
         "pdf_content": pdf_content
     }
     
-    # Log errors
-    if structured_response.get("status", "") == "error":
-        logger.warning(f"Structured output failed: {structured_response.get('message', 'Unknown error')}")
-    if convo_response.get("status", "") == "error":
-        logger.warning(f"Conversational output failed: {convo_response.get('message', 'Unknown error')}")
+    # Validate result completeness
+    if structured_response.get("status", "") == "error" and not pdf_content:
+        logger.error("❌ Both structured output and PDF content failed")
+        raise Exception("RAG generation failed: no usable output generated")
     
-    logger.info(f"Response structure - structured status: {result['structured']['status']}, " +
-                f"conversational status: {result['conversational']['status']}, " +
-                f"pdf_content length: {len(result['pdf_content'])}")
+    # Final logging
+    status = result['structured']['status']
+    pdf_length = len(result['pdf_content'])
+    if status == "success":
+        module_count = len([k for k in result['structured']['data'].keys() if k.startswith('module_')])
+        logger.info(f"✅ RAG generation completed successfully - {module_count} modules, {pdf_length} chars PDF content")
+    else:
+        logger.warning(f"⚠️ RAG generation completed with errors - status: {status}, PDF content: {pdf_length} chars")
     
-    # Check if at least one response succeeded
-    if (structured_response.get("status", "") == "error" and 
-        convo_response.get("status", "") == "error" and
-        not pdf_content):
-        logger.error("All response types failed")
-        raise Exception(f"RAG generation failed: All response types failed.")
-    
-    logger.info("RAG generation completed successfully")
     return result
 
+# === Testing and Debug Utilities ===
+def test_prompt_pipeline(
+    query: str,
+    custom_prompt: Optional[str] = None,
+    qdrant_docs: Optional[List[Dict[str, Any]]] = None,
+    pdf_docs: Optional[List[Dict[str, Any]]] = None,
+    kg_paths: Optional[List[Dict[str, Any]]] = None,
+    kg_insights: Optional[List[Dict[str, Any]]] = None,
+    extra: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Test and debug the prompt pipeline without making LLM calls."""
+    base_input = {
+        "refined_query": {"refined_query": query},
+        "prompt": custom_prompt,
+        "qdrant_docs": qdrant_docs or [],
+        "pdf_docs": pdf_docs or [],
+        "kg_paths": kg_paths or [],
+        "kg_insights": kg_insights or []
+    }
+    if extra:
+        base_input.update(extra)
+
+    # Test module parsing
+    modules = parse_modules_robust(coerce_prompt_to_text(custom_prompt))
+    system_message = get_custom_prompt(base_input) or "Default system message"
+    
+    # Format context
+    context_text = format_chunks(base_input["qdrant_docs"])
+    pdf_text = format_pdf_content(base_input["pdf_docs"])
+    kg_path_text = format_kg_paths(base_input["kg_paths"])
+
+    return {
+        "query": query,
+        "modules_found": len(modules),
+        "modules_summary": [{"module": m["module"], "title": m["title"][:50], "content_length": len(m["content"])} for m in modules],
+        "system_message_length": len(system_message),
+        "context_length": len(context_text),
+        "pdf_content_length": len(pdf_text),
+        "kg_paths_length": len(kg_path_text),
+        "system_message_preview": system_message[:500] + "..." if len(system_message) > 500 else system_message
+    }
+
+# === Test Entry Point ===
+if __name__ == "__main__":
+    # Test with the sample BNPL prompt
+    sample_prompt = """Module 1 — Executive Summary
+
+Summarizes why BNPL is strategically relevant in the sector and geography.
+
+Highlights key market shifts, pain points, and strategic opportunities.
+
+Includes 2—3 headline contrasts between BNPL and traditional credit models.
+
+Module 2 — KPI Enhancements (Make It Measurable)
+
+Outlines core BNPL metrics: GMV, ticket size, CAC, repeat rate, delinquency.
+
+Includes sector-specific reference metrics (e.g., % financed transactions, OOP burden, claim cycles).
+
+Establishes a baseline to track adoption, performance, and unit economics.
+
+Module 3 — Market Segmentation & Demand Drivers
+
+Segments BNPL usage by product/service type, user tier, and geography.
+
+Highlights key behavioral and financial drivers influencing adoption.
+
+Surfaces pockets of demand variation (e.g., discretionary vs urgent use cases).
+
+Module 4 — Competitive Landscape Mapping
+
+Categorizes players by operating model: direct lender, aggregator, platform enabler.
+
+Compares differentiation: underwriting IP, distribution, sector focus, embedded design.
+
+Includes monetization strategies and a structured mapping table.
+
+Module 5 — Regulatory & Risk Landscape
+
+Summarizes applicable digital lending, KYC, and bureau compliance requirements.
+
+Flags sector-specific regulatory nuances and emerging governance models.
+
+Highlights key risks: fraud exposure, mis-selling, overextension, regulatory friction.
+
+Module 6 — Consumer Persona Deep Dive
+
+Presents 2—3 representative user personas contextualized to the sector.
+
+Captures financial context, usage motivation, repayment behavior, and triggers.
+
+Illuminates real-life friction points and adoption pathways.
+
+Module 7 — Embedded Finance & UX Integration
+
+Maps where and how BNPL is embedded in the user journey (checkout, PoS, billing, app).
+
+Shows how design influences activation, drop-offs, and overall conversion.
+
+Highlights embedded models that deliver frictionless access at point-of-need.
+
+Module 8 — Strategic Opportunities & White Spaces
+
+Identifies underserved categories, segments, and locations.
+
+Highlights adjacent use cases: recurring payments, co-pay financing, deferred insurance.
+
+Surfaces partnership opportunities (e.g., insurers, employers, aggregators).
+
+Module 9 — Global Benchmarks & Learnings
+
+Showcases 2—3 relevant international BNPL models from similar verticals.
+
+Distills success factors: CAC control, embedded UX, risk mitigation, hybrid models.
+
+Highlights localization needs and regulatory contrasts.
+
+Module 10 — Future Outlook Scenarios
+
+Scenario A (Optimistic): High ecosystem alignment, CAC efficiencies, broad merchant uptake.
+
+Scenario B (Moderate): Gradual growth, localized adoption, regulatory caution.
+
+Scenario C (Risky): Overregulation, credit misuse, or institutional resistance.
+"""
+    
+    print("=" * 60)
+    print("TESTING MODULE PARSING")
+    print("=" * 60)
+    
+    # Test module parsing directly
+    modules = parse_modules_robust(sample_prompt)
+    print(f"Parsed {len(modules)} modules:")
+    for module in modules:
+        print(f"  Module {module['module']}: {module['title']}")
+    
+    print("\n" + "=" * 60)
+    print("TESTING FULL PIPELINE")
+    print("=" * 60)
+    
+    # Test full pipeline
+    debug_result = test_prompt_pipeline(
+        query="Provide comprehensive BNPL strategic analysis",
+        custom_prompt=sample_prompt
+    )
+    
+    print(json.dumps(debug_result, indent=2))
+    
+    print(f"\n🎯 RESULT: Found {debug_result['modules_found']} modules for schema generation")

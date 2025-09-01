@@ -298,17 +298,18 @@ class RetrievalAgent:
             logger.info(f"[Qdrant posts] Retrieved {len(hits)} hits")
             
             # Print detailed chunk information
-            logger.info("=== QDRANT CHUNKS RETRIEVED ===")
-            for i, hit in enumerate(hits):
-                payload = hit.payload or {}
-                text_preview = payload.get('text', payload.get('content', ''))[:200]
-                logger.info(f"Chunk {i+1}:")
-                logger.info(f"  Score: {hit.score:.4f}")
-                logger.info(f"  PostID: {payload.get('postId', 'N/A')}")
-                logger.info(f"  Text preview: {text_preview}...")
-                logger.info(f"  Full payload keys: {list(payload.keys())}")
-                logger.info("  " + "-" * 50)
-            logger.info("=== END QDRANT CHUNKS ===")
+            # logger.info("=== QDRANT CHUNKS RETRIEVED ===")
+            # for i, hit in enumerate(hits):
+            #     payload = hit.payload or {}
+
+            #     text_preview = payload.get('text', payload.get('content', ''))[:200]
+            #     logger.info(f"Chunk {i+1}:")
+            #     logger.info(f"  Score: {hit.score:.4f}")
+            #     logger.info(f"  PostID: {payload.get('postId', 'N/A')}")
+            #     logger.info(f"  Text preview: {text_preview}...")
+            #     logger.info(f"  Full payload keys: {list(payload.keys())}")
+            #     logger.info("  " + "-" * 50)
+            # logger.info("=== END QDRANT CHUNKS ===")
             
             return hits
         except Exception as e:
@@ -477,7 +478,7 @@ class RetrievalAgent:
         chunk_texts = self.neo4j_graph.query(chunk_text_query, {"chunk_ids": chunk_ids})
         
         # Log the chunk texts retrieved from Neo4j
-        logger.info("=== NEO4J CHUNK TEXTS RETRIEVED ===")
+        # logger.info("=== NEO4J CHUNK TEXTS RETRIEVED ===")
         chunk_content = []
         for i, row in enumerate(chunk_texts):
             chunk_id = row.get("chunk_id", "unknown")
@@ -490,11 +491,11 @@ class RetrievalAgent:
                     "text": text,
                     "source": "neo4j_chunk"
                 })
-                logger.info(f"Neo4j Chunk {i+1}:")
-                logger.info(f"  Chunk ID: {chunk_id}")
-                logger.info(f"  Text preview: {text[:200]}...")
-                logger.info("  " + "-" * 50)
-        logger.info("=== END NEO4J CHUNK TEXTS ===")
+        #         logger.info(f"Neo4j Chunk {i+1}:")
+        #         logger.info(f"  Chunk ID: {chunk_id}")
+        #         logger.info(f"  Text preview: {text[:200]}...")
+        #         logger.info("  " + "-" * 50)
+        # logger.info("=== END NEO4J CHUNK TEXTS ===")
         
         # Then get the knowledge graph paths
         cypher = f"""
@@ -538,14 +539,14 @@ class RetrievalAgent:
         path_results = self.neo4j_graph.query(cypher, {"chunk_ids": chunk_ids})
         
         # Log the knowledge graph paths
-        logger.info("=== NEO4J KNOWLEDGE GRAPH PATHS ===")
-        for i, row in enumerate(path_results):
-            logger.info(f"Path {i+1}:")
-            logger.info(f"  {row.get('start_type', 'Unknown')} '{row.get('start_name', 'Unknown')}' " +
-                       f"{row.get('relationship', 'related to').replace('_', ' ')} " +
-                       f"{row.get('end_type', 'Unknown')} '{row.get('end_name', 'Unknown')}'")
-            logger.info("  " + "-" * 50)
-        logger.info("=== END NEO4J KNOWLEDGE GRAPH PATHS ===")
+        # logger.info("=== NEO4J KNOWLEDGE GRAPH PATHS ===")
+        # for i, row in enumerate(path_results):
+        #     logger.info(f"Path {i+1}:")
+        #     logger.info(f"  {row.get('start_type', 'Unknown')} '{row.get('start_name', 'Unknown')}' " +
+        #                f"{row.get('relationship', 'related to').replace('_', ' ')} " +
+        #                f"{row.get('end_type', 'Unknown')} '{row.get('end_name', 'Unknown')}'")
+        #     logger.info("  " + "-" * 50)
+        # logger.info("=== END NEO4J KNOWLEDGE GRAPH PATHS ===")
         
         return path_results, chunk_content
 
@@ -658,19 +659,19 @@ class RetrievalAgent:
             )
             
             # Print detailed PDF chunk information
-            logger.info("=== PDF CHUNKS RETRIEVED ===")
-            for i, hit in enumerate(hits):
-                payload = hit.payload or {}
-                text_preview = payload.get('chunk_text', '')[:200]
-                logger.info(f"PDF Chunk {i+1}:")
-                logger.info(f"  Score: {hit.score:.4f}")
-                logger.info(f"  Doc Title: {payload.get('doc_title', 'N/A')}")
-                logger.info(f"  Is Table: {payload.get('is_table', False)}")
-                logger.info(f"  Chunk ID: {payload.get('chunk_id', 'N/A')}")
-                logger.info(f"  Text preview: {text_preview}...")
-                logger.info(f"  Full payload keys: {list(payload.keys())}")
-                logger.info("  " + "-" * 50)
-            logger.info("=== END PDF CHUNKS ===")
+            # logger.info("=== PDF CHUNKS RETRIEVED ===")
+            # for i, hit in enumerate(hits):
+            #     payload = hit.payload or {}
+            #     text_preview = payload.get('chunk_text', '')[:200]
+            #     logger.info(f"PDF Chunk {i+1}:")
+            #     logger.info(f"  Score: {hit.score:.4f}")
+            #     logger.info(f"  Doc Title: {payload.get('doc_title', 'N/A')}")
+            #     logger.info(f"  Is Table: {payload.get('is_table', False)}")
+            #     logger.info(f"  Chunk ID: {payload.get('chunk_id', 'N/A')}")
+            #     logger.info(f"  Text preview: {text_preview}...")
+            #     logger.info(f"  Full payload keys: {list(payload.keys())}")
+            #     logger.info("  " + "-" * 50)
+            # logger.info("=== END PDF CHUNKS ===")
             
             # Apply additional filtering for PDF documents
             filtered_hits = []
