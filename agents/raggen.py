@@ -208,7 +208,7 @@ def get_structured_llm(modules: List[Dict[str, Any]]):
     
     # Use GPT-4 with function calling for structured output (more reliable)
     llm_struct = ChatOpenAI(
-        model="gpt-4.1",
+        model="gpt-4o",
         temperature=1,
         api_key=os.getenv("OPENAI_API_KEY")
     ).with_structured_output(current_response_model, method="function_calling")
