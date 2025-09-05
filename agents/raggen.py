@@ -208,8 +208,10 @@ def get_structured_llm(modules: List[Dict[str, Any]]):
     
     # Use GPT-4 with function calling for structured output (more reliable)
     llm_struct = ChatOpenAI(
-        model="gpt-4o",
+        model="gpt-4.1",
         temperature=1,
+        streaming=True,
+
         api_key=os.getenv("OPENAI_API_KEY")
     ).with_structured_output(current_response_model, method="function_calling")
     
@@ -257,20 +259,23 @@ def get_custom_prompt(input_data: Dict[str, Any]) -> Optional[str]:
 
 1. MANDATORY MODULE COMPLETION:
    - You MUST generate content for ALL {len(modules)} modules specified above
-   - Each module is REQUIRED and must contain substantial, detailed analysis
+   - Each module is REQUIRED and must contain substantial, detailed analysis and tables such be there.
    - NO module may be left empty, incomplete, or with placeholder content
+   - Try like you are writing a detailed report for a senior executive audience, they expect depth and actionable insights. Multiple tables, multiple subheadings are appreciated.
 
 2. CONTENT QUALITY STANDARDS:
    - Each module must contain 300-400 words of comprehensive, data-rich content
    - Include specific examples, metrics, and detailed insights for each module
    - Address ALL requirements explicitly mentioned in each module description
    - If module mentions comparisons, scenarios, personas, or metrics - include ALL of them
+   - Read the module description CAREFULLY and ensure FULL compliance, use every point in the description as a checklist and make a substantial effort to address each point.
 
 3. STRUCTURE REQUIREMENTS:
    - Use tables for comparative data where specified
    - Include bullet points for key insights within each module
    - Provide specific examples and concrete details, not generalities
    - Ensure each module is substantive and actionable
+   - Every line of example or bullet point must be of atleast 30-40 words. Do not miss out on any details.
 
 4. JSON OUTPUT REQUIREMENTS:
    - Return ONLY valid JSON with no markdown formatting

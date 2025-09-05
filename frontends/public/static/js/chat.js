@@ -5,8 +5,8 @@ let activeSessionId = null;
 // === GLOBAL STATE (add near top if not present) ===
 let isWaitingForResponse = false;
 
-const API_BASE = "/api"; // Update with your actual API base URL
-const DEBUG = true;
+const API_BASE = "http://54.210.154.126:8000"; // Update with your actual API base URL
+const DEBUG = false;
 
 // Debug function
 function debug(label, data) {
