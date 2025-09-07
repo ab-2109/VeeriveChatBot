@@ -282,6 +282,9 @@ def get_custom_prompt(input_data: Dict[str, Any]) -> Optional[str]:
    - Every module field (module_1, module_2, etc.) must be populated
    - Each module must have title, content, and relevant supporting elements
 
+5. THIS IS A NON-NEGOTIABLE REQUIREMENT:
+    - If you think query mentions country or region or a specific sector and the data that is required is not available, you must say "Data not available for [country/region/sector], please provide more context or a different focus area" in the content field of that module. Do not leave it blank or incomplete. But do not hallucinate and provide false data or irrelevant data.
+
 FAILURE TO COMPLETE ALL MODULES WILL RESULT IN AN INCOMPLETE ANALYSIS."""
 
         return f"{formatted_modules}\n\n{critical_instructions}"
