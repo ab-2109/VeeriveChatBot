@@ -142,28 +142,26 @@ def _extract_from_bullets(text: str) -> List[Dict[str, Any]]:
     """Extract modules from bullet-pointed or structured text."""
     modules = []
     
-    # Try different bullet patterns
+    # Safe, escaped character classes (hyphen first); supports -, •, ▪, ▫, en dash, em dash
     bullet_patterns = [
-        r'[•▪▫–—-]\s*([^•▪▫–—-\n]{20,}?)(?=\s*[•▪▫–—-]|$)',
-        r'(?:^|\n)\s*[-*]\s*([^-*\n]{20,}?)(?=\s*(?:^|\n)\s*[-*]|$)',
+        r'[\-\u2022\u25AA\u25AB\u2013\u2014]\s*([^\-\u2022\u25AA\u25AB\u2013\u2014\n]{20,}?)(?=\s*[\-\u2022\u25AA\u25AB\u2013\u2014]|$)',
+        r'(?:^|\n)\s*[\-\*]\s*([^\-\*\n]{20,}?)(?=\s*(?:^|\n)\s*[\-\*]|$)',
         r'(?:^|\n)\s*(\d+\.?\s*[^0-9\n]{20,}?)(?=\s*(?:^|\n)\s*\d+\.|$)'
     ]
     
     for pattern in bullet_patterns:
-        matches = re.findall(pattern, text, re.MULTILINE | re.DOTALL)
+        try:
+            matches = re.findall(pattern, text, re.MULTILINE | re.DOTALL)
+        except re.error as rex:
+            logger.warning(f"Bullet regex failed ({rex}); skipping pattern.")
+            continue
         if matches and len(matches) >= 2:
             for i, content in enumerate(matches[:8]):  # Max 8 modules
                 content = content.strip()
                 if len(content) > 15:
-                    # Extract title from first part
                     title_match = re.match(r'^([^.!?]{5,60})', content)
                     title = title_match.group(1).strip() if title_match else f"Section {i+1}"
-                    
-                    modules.append({
-                        "module": i + 1,
-                        "title": title,
-                        "content": content
-                    })
+                    modules.append({"module": i + 1, "title": title, "content": content})
             break
     
     return modules
@@ -283,7 +281,7 @@ def get_custom_prompt(input_data: Dict[str, Any]) -> Optional[str]:
    - Each module must have title, content, and relevant supporting elements
 
 5. THIS IS A NON-NEGOTIABLE REQUIREMENT:
-    - If you think query mentions country or region or a specific sector and the data that is required is not available, you must say "Data not available for [country/region/sector], please provide more context or a different focus area" in the content field of that module. Do not leave it blank or incomplete. But do not hallucinate and provide false data or irrelevant data.
+    - If you think query mentions country or region and the data that is required is not available, you must say "Data not available for [country/region], please provide more context or a different focus area" in the content field of that module. Do not leave it blank or incomplete. But do not hallucinate and provide false data or irrelevant data.
 
 FAILURE TO COMPLETE ALL MODULES WILL RESULT IN AN INCOMPLETE ANALYSIS."""
 
@@ -486,7 +484,17 @@ def run_rag_generator(input_data: Dict[str, Any], session_id: str = "default"):
     """Main RAG generation function with comprehensive logging."""
     if not isinstance(session_id, str):
         raise ValueError("session_id must be a string")
-    
+
+    # Early exit if country gate message present
+    gate_msg = input_data.get("country_gate_message")
+    if gate_msg:
+        logger.info("Country gate message present in generator input; bypassing LLM.")
+        return {
+            "conversational": gate_msg,
+            "structured": {"status": "success", "data": {}},
+            "pdf_content": ""
+        }
+
     logger.info(f"🚀 Starting RAG generation for session: {session_id}")
     
     # Log comprehensive input statistics

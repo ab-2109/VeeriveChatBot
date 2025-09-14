@@ -2,18 +2,15 @@
 let waitingForClarification = false;
 let activeSessionId = null;
 
-// === GLOBAL STATE (add near top if not present) ===
 let isWaitingForResponse = false;
 
-const API_BASE = "http://localhost:8000"; // Update with your actual API base URL
+const API_BASE = "http://localhost:8000"; 
 const DEBUG = false;
 
-// Debug function
 function debug(label, data) {
     if (!DEBUG) return;
     console.log(`DEBUG - ${label}:`, data);
     
-    // Also show in UI if we have a debug panel
     const debugPanel = document.getElementById('debug-panel');
     if (debugPanel) {
         const entry = document.createElement('div');
@@ -24,7 +21,6 @@ function debug(label, data) {
 }
 
 
-// --- Simple Paginator for PDF sections ---
 function makePaginator(items, renderItem, opts = {}) {
     const pageSize = opts.pageSize || 4;
     const title = opts.title || '';
@@ -99,19 +95,16 @@ styleEl.textContent = `
 document.head.appendChild(styleEl);
 
 
-    // Create debug panel
     const debugPanel = document.createElement('div');
     debugPanel.id = 'debug-panel';
     debugPanel.style = 'position: fixed; bottom: 10px; right: 10px; width: 300px; height: 200px; background: #f5f5f5; border: 1px solid #ccc; overflow: auto; padding: 10px; font-size: 11px; z-index: 9999;';
     document.body.appendChild(debugPanel);
     
-    // Get DOM elements
     const messagesContainer = document.getElementById('messages-container');
     const questionInput = document.getElementById('question-input');
     const sendButton = document.getElementById('send-button');
     console.log('Send button found:', !!sendButton);
     
-    // Test API connection
     fetch(`${API_BASE}/`)
         .then(res => res.json())
         .then(data => {
@@ -673,8 +666,9 @@ function escapeHtml(s) {
     return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
 
-function renderValue(val) {
-    // Strings that look like tables-in-JSON
+function renderValue(val, opts = {}) {
+    const noLabels = !!opts.suppressLabels;
+// Strings that look like tables-in-JSON
     if (typeof val === 'string') {
         const maybe = tryParseJson(val);
         if (maybe && (maybe.headers || maybe.rows)) return renderTable(maybe);
@@ -703,22 +697,26 @@ function renderValue(val) {
         let html = '';
         for (const k in val) {
             const pretty = k.replace(/_/g,' ').replace(/([A-Z])/g,' $1').trim();
-            html += `<div class="section"><h5>${escapeHtml(pretty)}</h5>${renderValue(val[k])}</div>`;
+            html += noLabels
+                ? `<div class="section">${renderValue(val[k], opts)}</div>`
+                : `<div class="section"><h5>${escapeHtml(pretty)}</h5>${renderValue(val[k], opts)}</div>`;
         }
-        return html;
+return html;
     }
     // Fallback
     return `<p>${escapeHtml(String(val ?? ''))}</p>`;
 }
 
 function renderModuleAccordion(moduleName, moduleData, open=false) {
-    const title = moduleName.replace(/([A-Z])/g,' $1').trim();
+const title = moduleName.replace(/([A-Z])/g,' $1').trim();
     const det = document.createElement('details');
     det.className = 'dropdown-section';
     if (open) det.setAttribute('open','open');
 
     const sum = document.createElement('summary');
-    sum.innerHTML = `<h4>${escapeHtml(title)}</h4>`;
+    const displayTitle = (moduleData && typeof moduleData === 'object' && moduleData.title)
+        ? moduleData.title : title;
+    sum.innerHTML = `<h4>${escapeHtml(displayTitle)}</h4>`;
     det.appendChild(sum);
 
     const inner = document.createElement('div');
@@ -728,13 +726,14 @@ function renderModuleAccordion(moduleName, moduleData, open=false) {
         inner.innerHTML = markdownToHtml(moduleData);
     } else if (typeof moduleData === 'object' && moduleData !== null) {
         for (const key in moduleData) {
-            const label = key.replace(/_/g,' ').replace(/([A-Z])/g,' $1').trim();
+            if (String(key).toLowerCase() === 'title') continue; // already shown in summary
             const section = document.createElement('div');
             section.className = 'section';
-            section.innerHTML = `<h4>${escapeHtml(label)}</h4>${renderValue(moduleData[key])}`;
+            // No subheaders like 'content', 'tables', 'bullet points' — just render the value
+            section.innerHTML = renderValue(moduleData[key], { suppressLabels: true });
             inner.appendChild(section);
         }
-    } else {
+} else {
         inner.innerHTML = `<p>${escapeHtml(String(moduleData ?? ''))}</p>`;
     }
     det.appendChild(inner);

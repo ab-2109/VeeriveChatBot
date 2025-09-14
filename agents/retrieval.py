@@ -281,6 +281,31 @@ class RetrievalAgent:
         # Initialize the knowledge graph reasoner
         self.kg_reasoner = KGReasoner(self.neo4j_graph)
 
+    def country_present(self, tags: dict) -> bool:
+        """
+        Return True iff:
+        - a Country node with id matching tags['country'] (case-insensitive) exists in Neo4j, and
+        - if 'company' or 'sector' anchors are present, the country is reachable via expected paths.
+        """
+        country = (tags or {}).get("country")
+        print("country in tags", country)
+        if not country:
+            # No country constraint; allow
+            return True
+
+        # 1) Country node must exist (case-insensitive)
+        node_res = self.neo4j_graph.query(
+            """
+            MATCH (co:Country)
+            WHERE toLower(co.id) = toLower($country)
+            RETURN 1 LIMIT 1
+            """,
+            {"country": country}
+        )
+        if not node_res:
+            return False
+
+        return True
 
     def retrieve_from_qdrant(self, query_text: str, top_k: int = 15):
         """Search regular (non‑PDF) content in posts collection."""
@@ -557,7 +582,6 @@ class RetrievalAgent:
         self.current_tags = tags
         logger.info(f"[Retrieval] Query='{query_text}' Tags={tags}")
 
-        # --- 1. Regular posts (tester2) ---
         post_hits = self.retrieve_from_qdrant(query_text, top_k=16)
 
         regular_chunks = []

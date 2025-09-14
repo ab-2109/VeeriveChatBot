@@ -20,12 +20,9 @@ class QueryRefinerAgent:
         self.llm = llm
         self.mongo_client = MongoClient(mongo_uri) if mongo_uri else None
         
-        # Use the collection object directly, not a cursor
         self.tag_db = self.mongo_client['veerive-db'] if self.mongo_client is not None else None
         
-        # Access the actual collections, not cursors
         if self.tag_db is not None:
-            # Using separate collections for each tag type
             self.sectors_collection = self.tag_db['sectors']
             self.countries_collection = self.tag_db['countries'] 
             self.companies_collection = self.tag_db['companies']
@@ -35,12 +32,10 @@ class QueryRefinerAgent:
             self.companies_collection = None
 
     def _verify_tag(self, tag_value: str, tag_type: str) -> Optional[str]:
-        """Checks if a tag value exists in MongoDB and returns normalized name."""
         if not tag_value:
             return tag_value
             
         try:
-            # Use the appropriate collection based on tag type
             if tag_type == "sector" and self.sectors_collection:
                 collection = self.sectors_collection
             elif tag_type == "country" and self.countries_collection:
@@ -59,18 +54,7 @@ class QueryRefinerAgent:
             return tag_value
 
     def refine(self, input_data: Union[str, Dict, IntakeState]) -> Dict:
-        """
-        Refine a query to extract structured tags.
-        
-        Args:
-            input_data: Can be:
-                - A string query
-                - An IntakeState object from intake.py
-                - A dictionary with at least a 'query' key
-                
-        Returns:
-            Dictionary with original_query, refined_query, and tags
-        """
+    
         # Extract query and metadata from different input types
         metadata = {}
         
@@ -96,7 +80,6 @@ class QueryRefinerAgent:
             ])
             clarification_context = f"\nAdditional context from clarifications:\n{clarification_text}"
             
-        # Create the prompt with enriched context
         prompt = f"""
 You are an intelligent query refiner. Extract the following structured tags from the user query:
 - Sector (the industry or business domain)
@@ -127,7 +110,6 @@ Leave tag values empty (as "") if they are not present in the query.
             response = self.llm.invoke(prompt)
             response_text = response.content if hasattr(response, 'content') else str(response)
             
-            # Clean up response if needed (handling markdown code blocks)
             if response_text.startswith('```'):
                 parts = response_text.split('```')
                 if len(parts) >= 3:
@@ -135,10 +117,8 @@ Leave tag values empty (as "") if they are not present in the query.
                     if response_text.startswith('json'):
                         response_text = response_text[4:].strip()
             
-            # Parse JSON response
             parsed = json.loads(response_text)
             
-            # Verify tags against MongoDB
             tags = parsed.get("tags", {})
             for key in ["sector", "country", "company"]:
                 if tags.get(key):
@@ -146,7 +126,6 @@ Leave tag values empty (as "") if they are not present in the query.
                     
             parsed["tags"] = tags
             
-            # Include original intake metadata for traceability
             if metadata:
                 parsed["metadata"] = metadata
                 
@@ -167,7 +146,6 @@ Leave tag values empty (as "") if they are not present in the query.
 
 
 def get_refiner():
-    """Helper function to get a pre-configured QueryRefinerAgent"""
     llm = ChatOpenAI(
         model="gpt-4o",
         temperature=0.0,
@@ -177,21 +155,3 @@ def get_refiner():
     password = urllib.parse.quote_plus("ConsTrack360")
     mongouri = f"mongodb+srv://{username}:{password}@veerive.tta8g.mongodb.net/"
     return QueryRefinerAgent(llm, mongo_uri=mongouri)
-
-
-if __name__ == "__main__":
-    # Example 2: Process via intake.py first
-    query = input("Enter your query: ")
-    
-    # First process through intake agent (interactive mode)
-    intake_result = process_intake(query, interactive=True)
-    print("\nIntake Result:")
-    print(json.dumps(intake_result, indent=2))
-    
-    if intake_result["status"] == "success":
-        # Then pass the intake state to the refiner
-        refiner = get_refiner()
-        refined = refiner.refine(intake_result["data"])
-        
-        print("\nRefined Query Result:")
-        print(json.dumps(refined, indent=2))

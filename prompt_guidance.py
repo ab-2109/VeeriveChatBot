@@ -25,8 +25,8 @@ class QdrantConfig:
     MONGO_URI = f"mongodb+srv://{MONGO_USERNAME}:{urllib.parse.quote_plus(MONGO_PASSWORD)}@veerive.tta8g.mongodb.net/"
 
     
-    QDRANT_URL = os.getenv("QDRANT_URL", "https://9c4151fc-4aaf-418b-ac17-970854ac8a8f.europe-west3-0.gcp.cloud.qdrant.io:6333")
-    QDRANT_API_KEY = os.getenv("QDRANT_API", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.RYAYHgpWnTy9SDZEkpER_1O_QSrvfZ-XTcrq8Wdhkx4")
+    QDRANT_URL = os.getenv("QDRANT_URL")
+    QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
     QDRANT_COLLECTION = "prompt-guidance"
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     EMBEDDING_MODEL = "text-embedding-3-large"
@@ -52,7 +52,6 @@ class PromptGuidanceHandler:
         return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", txt or "")).strip()
 
     def resolve_reference(self, collection_name: str, object_id: Union[str, ObjectId, None]) -> Optional[Dict]:
-        """Resolve MongoDB reference to actual object - similar to qdbtest.py and qdrant.py"""
         if not object_id:
             return None
             
@@ -86,7 +85,6 @@ class PromptGuidanceHandler:
                 subsector_doc = self.resolve_reference("subsectors", subsector_id)
                 # print("subsector_doc", subsector_doc)
                 
-                # Get names or use empty strings
                 sector_name = sector_doc.get("sectorName", "") if sector_doc else ""
                 subsector_name = subsector_doc.get("subSectorName", "") if subsector_doc else ""
                 
@@ -139,7 +137,6 @@ class PromptGuidanceHandler:
                 "updatedAt": str(doc.get("updatedAt")),
             }
 
-            # Stable deterministic integer ID from document ID for dedup/upsert
             stable_id_source = doc.get("id", uuid.uuid4().hex)
             point_id = int(hashlib.md5(stable_id_source.encode()).hexdigest(), 16) % (2**63)
 
@@ -186,7 +183,7 @@ class PromptGuidanceHandler:
         logger.info(f"Prompt guidance new docs: {len(new_docs)} (existing skipped: {len(documents)-len(new_docs)})")
         for doc in new_docs:
             self.vectorize_and_upsert(doc)
-        logger.info("✅ Prompt guidance upsert_missing complete.")
+        logger.info("Prompt guidance upsert_missing complete!!!!!!!!!.")
 
     def run(self):
         """Backward-compatible full upsert (no dedup check beyond deterministic ID)."""
@@ -194,7 +191,7 @@ class PromptGuidanceHandler:
         documents = self.fetch_documents()
         for doc in documents:
             self.vectorize_and_upsert(doc)
-        logger.info("✅ All prompts upserted successfully (run mode).")
+        logger.info("All prompts upserted successfully (run mode).!!!!!!!!!!!!!")
 
 
 if __name__ == "__main__":

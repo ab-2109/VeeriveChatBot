@@ -19,19 +19,18 @@ logger = logging.getLogger('graph_processor')
 load_dotenv()
 
 class GraphState(TypedDict):
-    query: str  # Single value - no annotation needed
-    metadata: Dict[str, Any]  # Regular dictionary type without annotation
+    query: str  
+    metadata: Dict[str, Any] 
     intake_state: Optional[Dict[str, Any]]
     refined_query: Optional[Dict[str, Any]]
     retrieval_results: Optional[Dict[str, Any]]
     generated_response: Optional[Dict[str, Any]]
     clarification_question: Optional[str]
-    clarification_answers: Optional[List[Dict[str, str]]]  # No annotation
+    clarification_answers: Optional[List[Dict[str, str]]] 
     status: Optional[str]
-    errors: Optional[List[str]]  # No annotation
+    errors: Optional[List[str]] 
 
 def init_retrieval_agent():
-    """Initialize RetrievalAgent with enhanced PDF support and better error handling"""
     try:
         username = os.getenv("MONGO_USERNAME")
         password = urllib.parse.quote_plus(os.getenv("MONGO_PASSWORD"))
@@ -44,8 +43,8 @@ def init_retrieval_agent():
             neo4j_uri=os.getenv("NEO4J_URI"),
             neo4j_user=os.getenv("NEO4J_USERNAME"),
             neo4j_pass=os.getenv("NEO4J_PASSWORD"),
-            qdrant_collection="tester2",  # Regular posts collection
-            pdf_collection="veerive_docs",  # PDF documents collection
+            qdrant_collection="tester2", 
+            pdf_collection="veerive_docs",  
             embed_model="text-embedding-3-large"
         )
     except Exception as e:
@@ -53,7 +52,6 @@ def init_retrieval_agent():
         raise
 
 def intake_node(state: GraphState) -> GraphState:
-    """Process initial query intake"""
     try:
         query = state["query"]
         metadata = state["metadata"]
@@ -85,66 +83,51 @@ def intake_node(state: GraphState) -> GraphState:
         }
 
 def clarification_node_wrapper(state: GraphState) -> GraphState:
-    """Wrapper around clarification node to ensure proper state handling"""
     try:
-        # Get the query from state
         query = state.get("query", "")
         
-        # Get metadata
         metadata = state.get("metadata", {})
         
-        # Get intake state - add to metadata if needed
         intake_state = state.get("intake_state")
         if intake_state:
             metadata["intake_state"] = intake_state
         
-        # Create a single state object for the clarification node
         clarification_state = {
             "query": query,
             "metadata": metadata
         }
         
-        # Call clarification node with the correct arguments
         result = clarification_node(clarification_state)
         
-        # Properly update state with result
         updated_state = {**state}
         
-        # Add clarification question if present
         if "clarification_question" in result:
             updated_state["clarification_question"] = result["clarification_question"]
         
-        # Make sure we're not setting status to None
         if "status" in result and result["status"]:
             updated_state["status"] = result["status"]
         
         return updated_state
     except Exception as e:
-        # Handle any exceptions
         return {**state, "errors": state.get("errors", []) + [f"Clarification error: {str(e)}"]}
 
 def refine_node(state: GraphState) -> GraphState:
-    """Refine the query based on intake and clarifications"""
     try:
         metadata = state.get("metadata", {})
         
         logger.info("Starting query refinement")
         
-        # If we've already got clarifications, use them with the original query
         if "clarifications" in metadata and metadata["clarifications"]:
-            # Either use intake_state or build minimal state with original query
             if state.get("intake_state"):
                 intake_state = state.get("intake_state", {})
                 intake_state["metadata"] = metadata
             else:
-                # Create a minimal intake state using the original query
                 original_query = metadata.get("original_query", state["query"])
                 intake_state = {
                     "query": original_query,
                     "metadata": metadata
                 }
         else:
-            # Normal flow from intake
             intake_state = state.get("intake_state", {})
         
         refined = get_refiner().refine(intake_state)
@@ -169,112 +152,94 @@ def refine_node(state: GraphState) -> GraphState:
         }
 
 def retrieve_node(state: GraphState) -> GraphState:
-    """Retrieve relevant information using enhanced RetrievalAgent with PDF support"""
     try:
         refined_query = state.get("refined_query", {})
-        
         logger.info(f"Starting retrieval for refined query: {refined_query.get('refined_query', '')[:100]}...")
-        
+
         retrieval_agent = init_retrieval_agent()
+
+
+        tags = refined_query.get("tags", {}) if isinstance(refined_query, dict) else {}
+        tags_lower = {k: (v.strip().lower() if isinstance(v, str) else v) for k, v in (tags or {}).items()}
+
+        if tags_lower.get("country") and not retrieval_agent.country_present(tags_lower):
+            logger.info("Country not present/connected in Neo4j; short-circuit to friendly message.")
+            empty_results = {
+                "qdrant_docs": [],
+                "pdf_docs": [],
+                "kg_insights": [],
+                "kg_paths": [],
+                "prompt": [],
+                "country_gate_message": "No information available regarding this country in the database.",
+            }
+            return {
+                "retrieval_results": empty_results,
+                "country_gate_message": "No information available regarding this country in the database.",
+                "status": "retrieval_complete"
+            }
+
         results = retrieval_agent.retrieve(refined_query)
-        
-        # Log retrieval statistics
-        qdrant_count = len(results.get("qdrant_docs", []))
-        pdf_count = len(results.get("pdf_docs", []))
-        kg_insights_count = len(results.get("kg_insights", []))
-        kg_paths_count = len(results.get("kg_paths", []))
-        prompt_count = len(results.get("prompt", []))
-        
-        logger.info(f"Retrieval completed: {qdrant_count} vector docs, {pdf_count} PDF docs, "
-                   f"{kg_insights_count} KG insights, {kg_paths_count} KG paths, {prompt_count} prompts")
-        
-        return {
-            "retrieval_results": results,
-            "status": "retrieval_complete"
-        }
+        return {"retrieval_results": results, "status": "retrieval_complete"}
     except Exception as e:
         logger.error(f"Retrieval error: {str(e)}")
-        return {
-            "errors": [f"Retrieval error: {str(e)}"],
-            "status": "error"
-        }
+        return {"errors": [f"Retrieval error: {str(e)}"], "status": "error"}
 
 def generate_node(state: GraphState) -> GraphState:
     """Generate final response using enhanced retrieval results including PDF documents"""
     try:
-        retrieval_results = state.get("retrieval_results", {})
+        retrieval_results = state.get("retrieval_results", {}) or {}
         refined_query = state.get("refined_query", {"refined_query": state["query"]})
-        
-        # Prepare input for the generator with enhanced data sources
+
+        gate_msg = state.get("country_gate_message") or retrieval_results.get("country_gate_message")
+        if gate_msg:
+            logger.info("Country gate message detected; short-circuiting generation with friendly message.")
+            friendly = {
+                "conversational": gate_msg,
+                "structured": {"data": {}},
+                "pdf": {"tables": [], "texts": [], "combined_markdown": ""}
+            }
+            return {"generated_response": friendly, "status": "complete"}
+
         generator_input = {
             "refined_query": refined_query,
             "qdrant_docs": retrieval_results.get("qdrant_docs", []),
-            "pdf_docs": retrieval_results.get("pdf_docs", []),  # Include PDF documents
+            "pdf_docs": retrieval_results.get("pdf_docs", []),
             "kg_paths": retrieval_results.get("kg_paths", []),
             "kg_insights": retrieval_results.get("kg_insights", []),
-            "prompt": retrieval_results.get("prompt", [])  # Include prompt guidance
+            "prompt": retrieval_results.get("prompt", [])
         }
-        
-        logger.info(f"Generating response with {len(generator_input['qdrant_docs'])} vector docs, "
-                   f"{len(generator_input['pdf_docs'])} PDF docs, and "
-                   f"{len(generator_input['kg_insights'])} KG insights")
-        
+        if gate_msg:
+            generator_input["country_gate_message"] = gate_msg
+
         result = run_rag_generator(generator_input)
-        
         logger.info("Response generation completed successfully")
-        
-        # Ensure we have the minimum structure for the frontend
         if isinstance(result, dict) and "structured" not in result and "conversational" not in result:
-            # Add some basic structure
-            result = {
-                "structured": {
-                    "data": {
-                        "module1": {
-                            "overview": result.get("response", "No detailed response available.")
-                        }
-                    }
-                },
-                "conversational": {
-                    "data": result.get("response", result.get("text", str(result)))
-                }
-            }
-        
-        return {
-            "generated_response": result,
-            "status": "complete"
-        }
+            result = {"structured": {"data": {}}, "conversational": str(result)}
+        return {"generated_response": result, "status": "complete"}
     except Exception as e:
         logger.error(f"Generation error: {str(e)}")
-        return {
-            "errors": [f"Generation error: {str(e)}"],
-            "status": "error"
-        }
+        return {"errors": [f"Generation error: {str(e)}"], "status": "error"}
 
 def should_continue(state: GraphState) -> str:
     """Determine the next step in the graph based on current state"""
-    # Check for errors first
     if state.get("errors"):
         return "error"
         
-    # For clarification node, check if we need clarification
     if "clarification_question" in state and state["clarification_question"]:
         return "needs_clarification"
     
-    # Based on what's in the state, determine the appropriate "continue" key
     if state.get("intake_state") and not state.get("refined_query"):
-        return "continue"  # After intake, go to clarification
+        return "continue"  
     elif state.get("refined_query") and not state.get("retrieval_results"):
-        return "continue_to_retrieve"  # After refine, go to retrieve
+        return "continue_to_retrieve" 
     elif state.get("retrieval_results") and not state.get("generated_response"):
-        return "continue_to_generate"  # After retrieve, go to generate
+        return "continue_to_generate" 
     elif state.get("generated_response"):
-        return "end"  # After generate, end the flow
+        return "end" 
     
-    # Default fallback if nothing matches
-    return "continue"  # Use the most general continue case
+    return "continue"  
 
 def build_graph() -> StateGraph:
-    """Build the complete processing graph"""
     builder = StateGraph(GraphState)
     
     # Add all nodes
@@ -287,7 +252,6 @@ def build_graph() -> StateGraph:
     # Set entry point
     builder.set_entry_point("intake")
     
-    # Define the flow with improved error handling
     builder.add_conditional_edges(
         "intake",
         should_continue,
@@ -305,8 +269,7 @@ def build_graph() -> StateGraph:
         {
             "error": "__end__",
             "needs_clarification": "__end__",
-            "continue": "refine",  # Changed from "continue_to_refine" to "continue"
-            # Add a fallback for unexpected values
+            "continue": "refine", 
             "_fallback": "refine"
         }
     )
@@ -369,23 +332,16 @@ def process_clarification(session_id: str, clarification_answer: str, metadata: 
     try:
         logger.info(f"Processing clarification answer for session {session_id}")
         
-        # Get the original query from metadata
         original_query = metadata.get("original_query", "")
         
-        # Update metadata with the clarification answer
         updated_metadata = process_clarification_answer(original_query, clarification_answer, metadata or {})
         
-        # Make sure we have the original query in metadata
         if "original_query" not in updated_metadata and original_query:
             updated_metadata["original_query"] = original_query
             
-        # Create a new graph for complete processing (don't try to skip steps)
         graph = build_graph()
-        
-        # Start fresh with the complete graph, but include all necessary context
-        # in metadata rather than trying to skip nodes
         result = graph.invoke({
-            "query": original_query,  # Use the original query
+            "query": original_query,  
             "metadata": updated_metadata,
             "errors": []
         })
@@ -399,41 +355,3 @@ def process_clarification(session_id: str, clarification_answer: str, metadata: 
             "errors": [f"Failed to process clarification: {str(e)}"]
         }
 
-# Test function for debugging
-def test_graph():
-    """Test the graph with a sample query"""
-    query = "Tell me about business models"
-    print(f"Testing query: {query}")
-    
-    result = process_query(query)
-    
-    if result.get("status") == "clarification_needed":
-        print(f"Clarification needed: {result.get('clarification_question')}")
-        
-        # Simulate answering the clarification
-        answer = "I want to know about SaaS business models"
-        print(f"Answering: {answer}")
-        
-        # Fix: Pass metadata as a dictionary containing result data
-        metadata = {
-            "original_query": query,
-            "clarification_question": result.get("clarification_question")
-        }
-        
-        final_result = process_clarification("test", answer, metadata)
-        
-        if final_result.get("generated_response"):
-            print("✅ Success! Generated response received.")
-        else:
-            print("❌ Failed to generate response")
-            print("Errors:", final_result.get("errors"))
-    
-    elif result.get("generated_response"):
-        print("✅ Success! No clarification needed.")
-    
-    else:
-        print("❌ Failed")
-        print("Errors:", result.get("errors"))
-
-if __name__ == "__main__":
-    test_graph()

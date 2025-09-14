@@ -49,13 +49,11 @@ class QueryResponse(BaseModel):
     conversation_history: Optional[List[ConversationMessage]] = None
     error: Optional[str] = None
 
-# --- Helper functions ---
 
 
 def format_response(response_data: Dict[str, Any], session_id: str = "") -> Dict[str, Any]:
     """Format the response from the graph for the frontend, including table-aware PDF content."""
     try:
-        # If clarification needed, short-circuit
         if response_data.get("status") == "clarification_needed":
             return {
                 "status": "clarification_needed",
@@ -63,7 +61,6 @@ def format_response(response_data: Dict[str, Any], session_id: str = "") -> Dict
                 "session_id": session_id
             }
 
-        # Helper to split pdf_docs into tables/texts
         def split_pdf_docs(pdf_docs):
             tables, texts = [], []
             for d in pdf_docs or []:
@@ -83,19 +80,14 @@ def format_response(response_data: Dict[str, Any], session_id: str = "") -> Dict
                     texts.append(entry)
             return tables, texts
 
-        # Extract generated_response if present
         if "generated_response" in response_data:
             response = response_data["generated_response"]
 
-            # Attempt to extract pdf content from multiple places
             pdf_docs = response_data.get("retrieval_results", {}).get("pdf_docs") or                        response_data.get("pdf_docs") or                        response.get("pdf_docs") or []
 
             tables, texts = split_pdf_docs(pdf_docs)
-
-            # Conversational content
             conversational_data = ""
             if isinstance(response, dict) and "conversational" in response:
-                # Might be plain string or dict with 'data'
                 conv = response["conversational"]
                 conversational_data = conv.get("data") if isinstance(conv, dict) else conv
 
@@ -158,19 +150,14 @@ def extract_conversational_content(response):
     """Extract conversational content from response regardless of format"""
     if isinstance(response, dict):
         if "conversational" in response:
-            # New format with structured/conversational split
-            content = response["conversational"].get("data", "")
-            if isinstance(content, dict):
-                return str(content)
-            return content
+            conv = response["conversational"]
+            if isinstance(conv, dict):
+                data = conv.get("data")
+                return str(data) if isinstance(data, (dict, list)) else (data or "")
+            return str(conv)  
         elif "text" in response:
-            # Simple format with text field
-            return response["text"]
-    
-    # Fallback to string representation
+            return str(response["text"])
     return str(response)
-
-# --- API endpoints ---
 
 @app.get("/")
 async def root():
@@ -199,19 +186,15 @@ async def handle_query(query_request: QueryRequest):
         
         if not query:
             return {"status": "error", "error": "Query cannot be empty"}
-        
-        # New query if no session_id is provided
         if not session_id:
             logger.info(f"Processing new query: '{query}'")
             result = process_query(query, query_request.metadata or {})
             
-            # DEBUG: Print retrieval results to terminal
             if "retrieval_results" in result:
                 print("\n========== RETRIEVAL RESULTS ==========")
                 print(f"Query: '{query}'")
                 retrieval = result["retrieval_results"]
                 
-                # Print regular documents
                 if "qdrant_docs" in retrieval:
                     print(f"\n----- REGULAR DOCUMENTS ({len(retrieval['qdrant_docs'])}) -----")
                     for i, doc in enumerate(retrieval["qdrant_docs"]):
@@ -219,21 +202,18 @@ async def handle_query(query_request: QueryRequest):
                         print(f"Text: {doc.get('text')[:200]}..." if len(doc.get('text', '')) > 200 else doc.get('text'))
                         print("---")
                 
-                # Print PDF documents
                 if "pdf_docs" in retrieval:
                     print(f"\n----- PDF DOCUMENTS ({len(retrieval['pdf_docs'])}) -----")
                     for i, doc in enumerate(retrieval["pdf_docs"]):
                         print(f"PDF {i+1}. Score: {doc.get('score')}, Relevance: {doc.get('relevance_score')}")
                         print(f"Content: {doc.get('formatted_content') or doc.get('text')[:200]}..." if len(doc.get('content', '')) > 200 else doc.get('formatted_content') or doc.get('text'))
                         print("---")
-                
-                # Print KG insights
+
                 if "kg_insights" in retrieval:
                     print(f"\n----- KNOWLEDGE GRAPH INSIGHTS ({len(retrieval['kg_insights'])}) -----")
                     for i, insight in enumerate(retrieval["kg_insights"]):
                         print(f"Insight {i+1}: {insight}")
                 
-                # Print KG paths
                 if "kg_paths" in retrieval:
                     print(f"\n----- KNOWLEDGE GRAPH PATHS ({len(retrieval['kg_paths'])}) -----")
                     for i, path in enumerate(retrieval["kg_paths"]):
@@ -253,7 +233,6 @@ async def handle_query(query_request: QueryRequest):
                 )
             ]
             
-            # Create a new session
             active_sessions[session_id] = {
                 "status": result.get("status", "unknown"),
                 "query": query,
@@ -262,7 +241,6 @@ async def handle_query(query_request: QueryRequest):
                 "conversation_history": conversation_history
             }
             
-            # Add clarification question to conversation history if needed
             if result.get("status") == "clarification_needed":
                 logger.info(f"Clarification needed: {result.get('clarification_question')}")
                 conversation_history.append(
@@ -275,13 +253,11 @@ async def handle_query(query_request: QueryRequest):
                     )
                 )
             
-            # Add response to conversation history if available
             elif "generated_response" in result:
                 response = result["generated_response"]
                 content = extract_conversational_content(response)
                 logger.info(f"Generated response: {content[:100]}...")
                 
-                # DEBUG: Print full generated response
                 print("\n========== GENERATED RESPONSE ==========")
                 print(f"Query: '{query}'")
                 print(f"Response type: {type(response)}")
@@ -432,7 +408,7 @@ async def handle_query(query_request: QueryRequest):
             
     except Exception as e:
         logger.exception(f"Error processing query: {str(e)}")
-        traceback.print_exc()  # Print full stack trace to terminal
+        traceback.print_exc()  
         return {"status": "error", "error": str(e)}
 
 @app.post("/clarification")
@@ -445,7 +421,6 @@ async def handle_clarification(clarification: ClarificationRequest):
         if session_id not in active_sessions:
             return {"status": "error", "error": "Invalid session ID"}
         
-        # Convert clarification request to a query request and delegate
         query_request = QueryRequest(
             query=answer,
             session_id=session_id
