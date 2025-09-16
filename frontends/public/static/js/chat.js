@@ -4,7 +4,7 @@ let activeSessionId = null;
 
 let isWaitingForResponse = false;
 
-const API_BASE = "http://localhost:8000"; 
+const API_BASE = "http://54.210.154.126:8000"; 
 const DEBUG = false;
 
 function debug(label, data) {
