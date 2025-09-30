@@ -6,7 +6,7 @@ from langchain_community.embeddings import OpenAIEmbeddings
 import os
 import urllib.parse
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 from dotenv import load_dotenv
 
 # Setup logging
@@ -589,7 +589,7 @@ class RetrievalAgent:
         for hit in post_hits:
             payload = hit.payload or {}
             if 'postId' not in payload:
-                continue  # ensure only true posts
+                continue
             chunk_id = "chunk_" + str(payload['postId'])
             regular_chunks.append(chunk_id)
             regular_docs_formatted.append({
@@ -603,7 +603,7 @@ class RetrievalAgent:
         logger.info(f"[Retrieval] Regular posts processed: {len(regular_docs_formatted)}")
 
         # --- 2. PDF collection (veerive_docs) ---
-        pdf_hits_raw = self.retrieve_from_pdf_docs(query_text, top_k=12)  # already filters & boosts
+        pdf_hits_raw = self.retrieve_from_pdf_docs(query_text, top_k=12)
         pdf_docs_processed = self.process_pdf_results(pdf_hits_raw)
         logger.info(f"[Retrieval] PDF processed: {len(pdf_docs_processed)}")
 
@@ -622,22 +622,47 @@ class RetrievalAgent:
             except Exception as e:
                 logger.error(f"[KG paths] Error: {e}")
 
+        # --- 4b. Gate by country ONLY within the subgraphs of retrieved chunk IDs ---
+        if tags.get("country"):
+            country_norm = str(tags["country"]).strip().lower()
+            related_chunk_ids = self.filter_chunks_by_country(regular_chunks, country_norm, depth=1)
+
+            # Keep only Neo4j chunk contents linked to the requested country
+            neo4j_chunks = [c for c in neo4j_chunks if c.get("id") in related_chunk_ids]
+            matched_count = len(related_chunk_ids)
+            logger.info(f"[Retrieval] Country-linked chunks matched: {matched_count} (country={country_norm})")
+
+            # Short-circuit if fewer than 2 country-matching nodes (chunks)
+            if matched_count < 2:
+                logger.info("[Retrieval] Insufficient country-related nodes (<2). Short-circuiting.")
+                return {
+                    "refined_query": refined_query,
+                    "qdrant_docs": [],
+                    "pdf_docs": [],
+                    "pdf_content": "",
+                    "kg_insights": [],
+                    "kg_paths": [],
+                    "prompt": [],
+                    "neo4j_chunks": [],
+                    "country_gate_message": "No information available regarding this country on frontend.",
+                }
+
         # --- 5. Prompt guidance ---
         prompt_results = self.retrieve_prompt(query_text, top_k=1)
 
         # --- 6. Assemble result ---
-        # Add Neo4j chunk content to the RAG context
         combined_docs = regular_docs_formatted + neo4j_chunks
         
         result = {
             "refined_query": refined_query,
-            "qdrant_docs": combined_docs,  # Include both regular Qdrant and Neo4j chunks
+            "qdrant_docs": combined_docs,
             "pdf_docs": pdf_docs_processed,
             "pdf_content": self.format_pdf_content(pdf_docs_processed),
             "kg_insights": reasoner_results,
             "kg_paths": pathscontext,
             "prompt": prompt_results,
-            "neo4j_chunks": neo4j_chunks,  # Include separately for completeness
+            "neo4j_chunks": neo4j_chunks,
+            "country_gate_message": None,
         }
 
         # DEBUG DUMP (trim large fields)
@@ -656,6 +681,34 @@ class RetrievalAgent:
 
         return result
     
+    def filter_chunks_by_country(self, chunk_ids: List[str], country: str, depth: int = 1) -> Set[str]:
+        """
+        Return the set of chunk_ids that are connected to the given country
+        within a bounded subgraph around each chunk (case-insensitive).
+        """
+        if not chunk_ids or not country:
+            return set()
+        try:
+            cypher = """
+            MATCH (c:Chunk)
+            WHERE c.id IN $chunk_ids
+            CALL apoc.path.subgraphAll(c, { maxLevel: $depth })
+            YIELD nodes
+            WITH c, [n IN nodes WHERE n:Country AND toLower(trim(n.id)) = $country] AS countries
+            WHERE size(countries) > 0
+            RETURN DISTINCT c.id AS chunk_id
+            """
+            params = {
+                "chunk_ids": chunk_ids,
+                "country": str(country).strip().lower(),
+                "depth": int(max(1, depth)),
+            }
+            rows = self.neo4j_graph.query(cypher, params)
+            return {row.get("chunk_id") for row in rows if isinstance(row, dict)}
+        except Exception as e:
+            logger.error(f"[Neo4j] Country filter on chunks failed: {e}")
+            return set()
+
     def retrieve_from_pdf_docs(self, query_text: str, top_k: int = 8):
         """Retrieve relevant PDF document chunks with enhanced filtering and scoring"""
         try:

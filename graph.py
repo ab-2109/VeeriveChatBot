@@ -158,27 +158,19 @@ def retrieve_node(state: GraphState) -> GraphState:
 
         retrieval_agent = init_retrieval_agent()
 
+        # Let RetrievalAgent.retrieve handle country gating based on retrieved chunk subgraphs
+        results = retrieval_agent.retrieve(refined_query)
 
-        tags = refined_query.get("tags", {}) if isinstance(refined_query, dict) else {}
-        tags_lower = {k: (v.strip().lower() if isinstance(v, str) else v) for k, v in (tags or {}).items()}
-
-        if tags_lower.get("country") and not retrieval_agent.country_present(tags_lower):
-            logger.info("Country not present/connected in Neo4j; short-circuit to friendly message.")
-            empty_results = {
-                "qdrant_docs": [],
-                "pdf_docs": [],
-                "kg_insights": [],
-                "kg_paths": [],
-                "prompt": [],
-                "country_gate_message": "No information available regarding this country in the database.",
-            }
+        # If retrieval short-circuited for country (<2 matching nodes), propagate the message
+        gate_msg = results.get("country_gate_message")
+        if gate_msg:
+            logger.info("Retrieval returned country gate message; propagating to state.")
             return {
-                "retrieval_results": empty_results,
-                "country_gate_message": "No information available regarding this country in the database.",
+                "retrieval_results": results,
+                "country_gate_message": gate_msg,
                 "status": "retrieval_complete"
             }
 
-        results = retrieval_agent.retrieve(refined_query)
         return {"retrieval_results": results, "status": "retrieval_complete"}
     except Exception as e:
         logger.error(f"Retrieval error: {str(e)}")
