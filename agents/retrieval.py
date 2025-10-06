@@ -644,7 +644,7 @@ class RetrievalAgent:
                     "kg_paths": [],
                     "prompt": [],
                     "neo4j_chunks": [],
-                    "country_gate_message": "No information available regarding this country on frontend.",
+                    "country_gate_message": "Sorry, no information is available.",
                 }
 
         # --- 5. Prompt guidance ---
